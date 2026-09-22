@@ -101,7 +101,11 @@ def build_tools(
     又会诱导模型去做多余的代码执行（多一轮就多几秒）。
     """
     registry = ToolRegistry()
-    register_builtin_tools(registry, include_search=not mock)
+    register_builtin_tools(
+        registry,
+        include_search=not mock,
+        serpapi_key=(settings or Settings.from_env()).serpapi_key,
+    )
     if mock:
         register_demo_tools(registry)
         return registry

@@ -165,7 +165,9 @@ def _build_tools(
     代码工具只给 coding 智能体，避免别的智能体在工具清单里被"诱导"去跑代码。
     """
     registry = ToolRegistry()
-    register_builtin_tools(registry, include_search=not mock)
+    register_builtin_tools(
+        registry, include_search=not mock, serpapi_key=settings.serpapi_key
+    )
     if mock:
         register_demo_tools(registry)
         return registry

@@ -75,10 +75,14 @@ def current_time(timezone: str = "Asia/Shanghai") -> str:
 # ----------------------------------------------------------------------- 搜索
 
 def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> str:
-    """用 SerpApi 做网页搜索，返回前若干条结果的标题与摘要。"""
+    """用 SerpApi 做网页搜索，返回前若干条结果的标题、摘要与链接。
+
+    ``api_key`` 由调用方注入（框架从 .env 读进 Settings 后再传进来）；
+    没有注入时退回读环境变量，方便单独调用。
+    """
     key = api_key or os.getenv("SERPAPI_API_KEY")
     if not key:
-        return "错误：未配置 SERPAPI_API_KEY，无法执行网页搜索。"
+        return "错误：未配置 SERPAPI_API_KEY，无法执行网页搜索（在 .env 里填上即可）。"
     try:
         from serpapi import SerpApiClient
 
@@ -93,7 +97,13 @@ def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> 
         )
         results = client.get_dict()
     except Exception as exc:  # noqa: BLE001 - 网络或配额问题统一转为提示
-        return f"错误：网页搜索失败（{exc}）。"
+        hint = ""
+        text = str(exc)
+        if "401" in text or "Invalid API key" in text.lower() or "사" in text:
+            hint = "（密钥可能无效或已过期，请到 SerpApi 后台确认）"
+        elif "429" in text or "run out" in text.lower() or "quota" in text.lower():
+            hint = "（搜索额度可能已用完）"
+        return f"错误：网页搜索失败{hint}：{text}"
 
     answer_box = results.get("answer_box") or {}
     if answer_box.get("answer"):
@@ -104,10 +114,15 @@ def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> 
     organic = results.get("organic_results") or []
     if not organic:
         return f"没有找到关于 '{query}' 的搜索结果。"
-    snippets = [
-        f"[{index}] {item.get('title', '')}\n{item.get('snippet', '')}"
-        for index, item in enumerate(organic[:max_results], start=1)
-    ]
+    snippets = []
+    for index, item in enumerate(organic[:max_results], start=1):
+        title = item.get("title", "")
+        snippet = item.get("snippet", "")
+        link = item.get("link", "")
+        block = f"[{index}] {title}\n{snippet}"
+        if link:
+            block += f"\n来源：{link}"
+        snippets.append(block)
     return "\n\n".join(snippets)
 
 
@@ -125,8 +140,16 @@ def mock_attraction(city: str, weather: str = "晴") -> str:
 
 # -------------------------------------------------------------------- 注册
 
-def register_builtin_tools(registry: ToolRegistry, include_search: bool = True) -> ToolRegistry:
-    """注册真实可用的内置工具。"""
+def register_builtin_tools(
+    registry: ToolRegistry,
+    include_search: bool = True,
+    serpapi_key: str | None = None,
+) -> ToolRegistry:
+    """注册真实可用的内置工具。
+
+    ``serpapi_key`` 由框架从配置里传进来——**不要再让工具自己去读进程环境变量**：
+    框架是直接解析 .env 的，不会把它写进 os.environ，那样会导致搜索永远"未配置"。
+    """
     registry.register_tool(
         "calculator",
         "计算一个算术表达式，例如 (15*2-5)/3。",
@@ -140,10 +163,15 @@ def register_builtin_tools(registry: ToolRegistry, include_search: bool = True) 
         {"timezone": "时区名，例如 Asia/Shanghai"},
     )
     if include_search:
+        def search(query: str) -> str:
+            """带配置密钥的网页搜索。"""
+            return web_search(query, api_key=serpapi_key)
+
         registry.register_tool(
             "web_search",
-            "网页搜索引擎，用于查询时事、事实以及模型知识库之外的信息。",
-            web_search,
+            "联网搜索：查时事、事实、天气、价格等模型知识库之外或可能过期的信息。"
+            "不确定或需要最新信息时应当使用它，不要凭记忆回答。",
+            search,
             {"query": "搜索关键词"},
         )
     return registry

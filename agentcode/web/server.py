@@ -51,16 +51,20 @@ def is_port_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout: fl
 def _tool_list(mock: bool, settings: Settings | None = None) -> list[dict[str, Any]]:
     """列出某种模式下的可用工具（只做清单，不创建工作目录）。"""
     registry = ToolRegistry()
-    register_builtin_tools(registry, include_search=not mock)
+    active_settings = settings or Settings.from_env()
+    register_builtin_tools(
+        registry,
+        include_search=not mock,
+        serpapi_key=active_settings.serpapi_key,
+    )
     if mock:
         register_demo_tools(registry)
     else:
-        active = settings or Settings.from_env()
         register_code_tools(
             registry,
-            root=active.code_root,
-            timeout=active.code_timeout,
-            output_limit=active.code_output_limit,
+            root=active_settings.code_root,
+            timeout=active_settings.code_timeout,
+            output_limit=active_settings.code_output_limit,
             create=False,
         )
     return [registry.get(name).to_dict() for name in registry.names()]  # type: ignore[union-attr]
