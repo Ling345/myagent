@@ -169,18 +169,18 @@ body {
 .session-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   flex: 1 1 auto;
-  min-height: 5.5rem;
-  max-height: 42vh;
+  min-height: 6rem;
+  max-height: none;
   overflow-y: auto;
+  margin-bottom: 4px;
 }
 
 /* 侧栏里其它块不允许被压缩，避免会话列表被挤成一条缝 */
 .new-chat,
 .sidebar-label,
-.agent-list,
-.sidebar-foot {
+.agent-list {
   flex: none;
 }
 
@@ -188,7 +188,8 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 8px 6px 12px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid transparent;
   border-radius: 10px;
 }
 
@@ -198,6 +199,7 @@ body {
 
 .session-row.is-active {
   background: var(--accent-soft);
+  border-color: var(--accent-line);
 }
 
 .session-name {
@@ -219,6 +221,25 @@ body {
 .session-row.is-active .session-name {
   color: var(--accent);
   font-weight: 500;
+}
+
+.session-count {
+  flex: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.session-row.is-active .session-count {
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+.session-empty {
+  padding: 10px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .session-row .icon {
@@ -307,51 +328,11 @@ body {
   line-height: 1.5;
 }
 
-.sidebar-foot {
-  margin-top: auto;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
-}
-
-.config {
-  margin: 0 0 10px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 3px 10px;
-  font-size: 12px;
-}
-
-.config dt {
-  color: var(--text-muted);
-}
-
-.config dd {
-  margin: 0;
-  font-family: var(--font-mono);
-  overflow-wrap: anywhere;
-}
-
 .hint {
   margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.6;
-}
-
-.ghost {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.ghost:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 button:disabled {
@@ -621,8 +602,7 @@ button:disabled {
   }
 
   .sidebar-label,
-  .agent-desc,
-  .sidebar-foot {
+  .agent-desc {
     display: none;
   }
 

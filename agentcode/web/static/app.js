@@ -4,7 +4,6 @@ const PREFERRED_AGENT = "react";
 const TIMER_INTERVAL_MS = 200;
 const SESSION_KEY = "agentcode-session";
 const MAX_TEXTAREA_HEIGHT = 200;
-const DEFAULT_SESSION_NAME = "新会话";
 
 const els = {
   form: document.getElementById("run-form"),
@@ -16,10 +15,7 @@ const els = {
   sessionList: document.getElementById("session-list"),
   agentList: document.getElementById("agent-list"),
   newSessionButton: document.getElementById("new-session-button"),
-  configList: document.getElementById("config-list"),
-  sessionHint: document.getElementById("session-hint"),
   chatSub: document.getElementById("chat-sub"),
-  exportButton: document.getElementById("export-button"),
 };
 
 const state = {
@@ -27,7 +23,6 @@ const state = {
   sessions: [],
   currentSessionId: null,
   running: false,
-  lastResult: null,
   timer: null,
   memorySessionId: null,
 };
@@ -88,7 +83,6 @@ async function loadMeta() {
     const agentsPayload = await agentsResponse.json();
     state.config = await configResponse.json();
     renderAgents(agentsPayload.agents);
-    renderConfig(state.config);
   } catch (error) {
     els.runStatus.textContent = `无法连接本地服务：${error.message}`;
   }
@@ -112,27 +106,6 @@ function renderAgents(agents) {
   });
 }
 
-function renderConfig(config) {
-  const rows = [
-    ["模型", config.model || "未配置"],
-    ["接口", config.base_url || "未配置"],
-    ["密钥", config.api_key || "未配置"],
-    ["搜索工具", config.serpapi_configured ? "已配置" : "未配置"],
-    ["步数上限", String(config.max_steps)],
-    ["记忆轮数", String(config.memory_turns ?? "—")],
-  ];
-  els.configList.innerHTML = rows
-    .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`)
-    .join("");
-
-  if (!config.ready) {
-    const note = document.createElement("p");
-    note.className = "hint";
-    note.textContent = `缺少 ${config.missing_keys.join("、")}，请先补齐 .env，否则运行会失败。`;
-    els.configList.after(note);
-  }
-}
-
 /* -------------------------------------------------------------- 会话列表 */
 
 async function loadSessions() {
@@ -148,14 +121,24 @@ async function loadSessions() {
 
 function renderSessionList() {
   els.sessionList.innerHTML = "";
+  if (!state.sessions.length) {
+    const empty = document.createElement("p");
+    empty.className = "session-empty";
+    empty.textContent = "还没有会话，点上面的「＋ 新会话」开始。";
+    els.sessionList.appendChild(empty);
+    return;
+  }
+
   state.sessions.forEach((session) => {
     const row = document.createElement("div");
     row.className = "session-row" + (session.id === state.currentSessionId ? " is-active" : "");
     row.dataset.id = session.id;
+    const count = Number(session.message_count || 0);
     row.innerHTML = `
       <button type="button" class="session-name" title="${escapeHtml(session.name)}">${escapeHtml(
         session.name
       )}</button>
+      ${count > 0 ? `<span class="session-count" title="共 ${count} 条消息">${count} 条</span>` : ""}
       <span class="icon-group">
         <button type="button" class="icon" data-action="rename" title="重命名">✎</button>
         <button type="button" class="icon" data-action="delete" title="删除">✕</button>
@@ -213,8 +196,6 @@ async function selectSession(sessionId) {
   }
   state.currentSessionId = payload.session.id;
   rememberSessionId(payload.session.id);
-  state.lastResult = null;
-  els.exportButton.disabled = true;
   renderSessionList();
   renderTranscript(payload.messages || []);
   const turns = countTurns(payload.messages || []);
@@ -300,11 +281,10 @@ function updateHeader(turns, kept, name) {
   const remembered = Number.isFinite(kept) ? kept : total;
   const parts = [name ? `「${name}」` : "", `${selectedAgent()} 智能体`, `共 ${total} 轮对话`];
   if (remembered > 0 && limit) parts.push(`已记住 ${remembered}/${limit} 轮上下文`);
+  if (state.config && !state.config.ready) {
+    parts.push(`缺少 ${state.config.missing_keys.join("、")}，运行会失败`);
+  }
   els.chatSub.textContent = parts.filter(Boolean).join(" · ");
-  els.sessionHint.textContent =
-    total > 0
-      ? `这个会话有 ${total} 轮对话，记忆保留最近 ${limit || "—"} 轮。`
-      : "当前会话还没有对话，提问一次之后就会记住。";
 }
 
 function renderTranscript(messages) {
@@ -468,13 +448,13 @@ function handleEventBlock(block, pending, sessionId) {
 
   // step 与 status 事件只会透露推理过程，页面上不做任何渲染
   if (type === "answer") {
-    resolvePending(pending, payload, sessionId);
+    resolvePending(pending, payload);
   } else if (type === "error") {
     failPending(pending, payload.message || "运行失败。");
   }
 }
 
-async function resolvePending(pending, result, sessionId) {
+async function resolvePending(pending, result) {
   const usage = result.usage || {};
   const answer = result.answer || "（这次没有得出结论）";
   const meta = [
@@ -492,20 +472,13 @@ async function resolvePending(pending, result, sessionId) {
   });
   currentTurnMessages.push({ role: "assistant", content: answer, success: result.success });
 
-  if (result.session_id && result.session_id !== state.currentSessionId) {
-    // 跑的过程中用户切换了会话（正常不会发生），这里只刷新列表不覆盖界面
-    await loadSessions();
-    return;
-  }
   await loadSessions();
-  state.lastResult = result;
-  els.exportButton.disabled = false;
   updateHeader(result.turn_index, result.memory_turns);
   els.runStatus.textContent = `已完成，用时 ${formatSeconds(result.duration_ms)}`;
 }
 
 function failPending(pending, message) {
-  const text = `${message} 请检查左侧面板里的模型、接口与密钥。`;
+  const text = `${message} 请检查 .env 里的模型配置。`;
   renderMessage(pending, {
     role: "assistant",
     text,
@@ -545,24 +518,8 @@ function fillSample(event) {
   els.task.focus();
 }
 
-/* ---------------------------------------------------------------- 导出 */
-
-function exportResult() {
-  if (!state.lastResult) return;
-  const blob = new Blob([JSON.stringify(state.lastResult, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${state.lastResult.agent}-result.json`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 els.form.addEventListener("submit", submitRun);
 els.newSessionButton.addEventListener("click", createSession);
-els.exportButton.addEventListener("click", exportResult);
 document.querySelectorAll(".sample").forEach((button) => {
   button.addEventListener("click", fillSample);
 });

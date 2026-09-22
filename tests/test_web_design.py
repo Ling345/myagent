@@ -56,3 +56,18 @@ def test_page_has_sample_prompts_with_agents():
     assert 'class="sample"' in html
     assert 'data-agent="coding"' in html
     assert 'data-agent="react"' in html
+
+
+def test_sidebar_has_no_model_panel():
+    """模型信息与它下面那一整块已经移除，腾出的高度留给会话列表。"""
+    html = _html()
+    assert 'id="config-list"' not in html
+    assert 'id="session-hint"' not in html
+    assert 'id="export-button"' not in html
+    assert "sidebar-foot" not in html
+
+
+def test_session_list_fills_freed_space():
+    css = _css()
+    assert "flex: 1 1 auto" in css  # 会占据侧栏剩余高度
+    assert "max-height: none" in css  # 不再被人为限高
