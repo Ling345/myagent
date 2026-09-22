@@ -148,14 +148,16 @@ textarea::placeholder {
   gap: 16px;
 }
 
-.mode-switch label {
+.mode-switch label,
+.checkbox {
   display: flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
 }
 
-.mode-switch input {
+.mode-switch input,
+.checkbox input {
   margin: 0;
   accent-color: var(--ink);
 }
@@ -232,7 +234,7 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
-/* -------------------------------------------------------------- 轨迹区域 */
+/* -------------------------------------------------------------- 结果区域 */
 
 .stream {
   display: flex;
@@ -334,27 +336,29 @@ button:disabled {
 }
 
 .answer {
-  padding: 20px 24px;
+  margin: auto 0;
+  padding: 24px 28px;
   background: var(--marker-soft);
   border-left: 3px solid var(--marker);
 }
 
 .answer-text {
   margin: 0;
-  font-size: 16px;
-  line-height: 1.7;
+  font-size: 17px;
+  line-height: 1.75;
   white-space: pre-wrap;
   max-width: 78ch;
 }
 
 .meta {
-  margin: 12px 0 0;
+  margin: 14px 0 0;
   color: #5c5726;
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .failure {
+  margin: auto 0;
   padding: 18px 22px;
   border: 1px solid #c9a08a;
   border-left: 3px solid #b4571f;
@@ -392,6 +396,10 @@ button:disabled {
 
   .stream {
     padding: 24px 20px 40px;
+  }
+
+  .answer {
+    margin: 0;
   }
 }
 

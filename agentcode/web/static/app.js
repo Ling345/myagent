@@ -1,11 +1,13 @@
-/* AgentCode 页面逻辑：查询智能体 → 提交任务 → 解析 SSE 逐步渲染轨迹 */
+/* AgentCode 页面逻辑：查询智能体 → 提交任务 → 解析 SSE，默认只渲染最终结果 */
 
 const PREFERRED_AGENT = "react";
+const TIMER_INTERVAL_MS = 200;
 
 const els = {
   form: document.getElementById("run-form"),
   agentList: document.getElementById("agent-list"),
   task: document.getElementById("task"),
+  showSteps: document.getElementById("show-steps"),
   runButton: document.getElementById("run-button"),
   runStatus: document.getElementById("run-status"),
   configList: document.getElementById("config-list"),
@@ -23,7 +25,9 @@ const els = {
 const state = {
   config: null,
   running: false,
+  showSteps: false,
   lastResult: null,
+  timer: null,
 };
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -114,9 +118,11 @@ async function submitRun(event) {
     task,
   };
 
+  state.showSteps = els.showSteps.checked;
   clearStream();
   setRunning(true);
   const startedAt = performance.now();
+  if (!state.showSteps) startProgressTimer(startedAt);
 
   try {
     const response = await fetch("/api/run", {
@@ -135,7 +141,23 @@ async function submitRun(event) {
   } catch (error) {
     showFailure(`无法连接本地服务：${error.message}`);
   } finally {
+    stopProgressTimer();
     setRunning(false);
+  }
+}
+
+function startProgressTimer(startedAt) {
+  stopProgressTimer();
+  state.timer = setInterval(() => {
+    const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+    els.runStatus.textContent = `运行中… ${seconds} 秒`;
+  }, TIMER_INTERVAL_MS);
+}
+
+function stopProgressTimer() {
+  if (state.timer) {
+    clearInterval(state.timer);
+    state.timer = null;
   }
 }
 
@@ -178,9 +200,10 @@ function handleEventBlock(block) {
 
 function handleEvent(type, payload) {
   if (type === "status") {
-    els.runStatus.textContent = payload.message || "";
+    // 未勾选「推理过程」时只用计时器提示进度，不暴露具体动作
+    if (state.showSteps) els.runStatus.textContent = payload.message || "";
   } else if (type === "step") {
-    appendStep(payload);
+    if (state.showSteps) appendStep(payload);
   } else if (type === "answer") {
     showAnswer(payload);
   } else if (type === "error") {
@@ -225,6 +248,7 @@ function appendStep(step) {
 
 function showAnswer(result) {
   state.lastResult = result;
+  els.empty.hidden = true;
   els.answer.hidden = false;
   els.exportButton.disabled = false;
   els.answerText.textContent = result.answer || "（没有给出答案）";
@@ -235,7 +259,9 @@ function showAnswer(result) {
     `约 ${usage.total_tokens || 0} token${usage.estimated ? "（估算）" : ""}`,
     `耗时 ${formatSeconds(result.duration_ms)}`,
   ].join("，");
-  els.runStatus.textContent = result.success ? "已完成" : "已结束，但没有得出结论";
+  els.runStatus.textContent = result.success
+    ? `已完成，用时 ${formatSeconds(result.duration_ms)}`
+    : "已结束，但没有得出结论";
 }
 
 function showFailure(message) {

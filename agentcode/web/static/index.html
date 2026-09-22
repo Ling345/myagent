@@ -12,7 +12,7 @@
       <aside class="rail">
         <header class="brand">
           <h1>AgentCode</h1>
-          <p class="brand-note">看它怎么一步步推理</p>
+          <p class="brand-note">选一个智能体，直接看结果</p>
         </header>
 
         <form id="run-form" class="controls" novalidate>
@@ -48,6 +48,17 @@
             </p>
           </fieldset>
 
+          <fieldset class="group">
+            <legend>显示</legend>
+            <label class="checkbox">
+              <input type="checkbox" id="show-steps" />
+              <span>推理过程</span>
+            </label>
+            <p class="hint">
+              默认只给结果，运行期间显示进度；勾选后会逐步显示每一步的思考与工具调用。
+            </p>
+          </fieldset>
+
           <button type="submit" id="run-button" class="primary">运行</button>
           <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
         </form>
@@ -60,9 +71,7 @@
       <main class="stream">
         <div class="empty" id="empty">
           <p>在左侧选一个智能体，写下任务，然后点运行。</p>
-          <p class="hint">
-            这里会逐步显示它的每一步：思考、调用的工具、工具返回的观察，最后给出答案。
-          </p>
+          <p class="hint">结果会显示在这里。想复盘它的推理过程，勾选左侧的「推理过程」。</p>
         </div>
 
         <ol class="steps" id="steps" hidden></ol>

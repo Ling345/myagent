@@ -1,7 +1,7 @@
 # AgentCode：可扩展的 Python 智能体框架
 
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
-新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，可以看着它一步步推理。
+新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，默认只给结果，需要时可展开推理过程。
 
 内置三种经典范式：
 
@@ -40,14 +40,16 @@ D:\Anaconda\python.exe -m agentcode web --port 8080 --open
 D:\Anaconda\python.exe -m agentcode web --llm openai    # 页面默认选中真实模型
 ```
 
-页面左侧选智能体、填任务、选模型，右侧按步骤实时出现轨迹：每一步的思考、调用的工具、
-工具返回的观察，最后是荧光黄标注的最终答案。运行结束后可以导出轨迹 JSON。
+页面**默认只给结果**：左侧选智能体、填任务、选模型，运行期间只显示进度计时，
+结束后给出荧光黄标注的最终答案。想看它是怎么想出来的，勾选左侧的「推理过程」，
+右侧就会逐步出现每一步的思考、调用的工具和工具返回的观察。两种模式下都可以导出完整轨迹 JSON。
 
 实现上分成两层：`agentcode/web/runner.py` 把一次运行变成事件流（`status` / `step` / `answer` / `error`），
 `agentcode/web/server.py` 用标准库 `http.server` 把它以 SSE 推给浏览器。整个过程**不新增任何依赖**，
 前端是一个不依赖框架和构建步骤的页面。服务只监听 `127.0.0.1`，不做鉴权，请勿暴露到公网。
 
-轨迹的实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`，它和命令行模式共用同一套执行代码。
+实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`；无论页面是否显示推理过程，
+事件流都会照常推送，所以将来要做更细的展示（比如只显示耗时或工具名）不需要改后端。
 
 ## 架构
 
@@ -100,6 +102,8 @@ $ D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "北�
 ================================================
 ```
 
+命令行会打印完整轨迹（终端本身就是给开发者看的），网页默认只给结果——两边的差别只在这里。
+
 ```powershell
 # 多步推理题：先列计划，再逐步算
 D:\Anaconda\python.exe -m agentcode run --agent plan_and_solve --llm mock --task "三天共卖出多少苹果"
@@ -133,7 +137,7 @@ class MyAgent(BaseAgent):
 ```
 
 在 `agentcode/agents/__init__.py` 中导入一次即完成注册，随后
-`python -m agentcode run --agent my_agent` 和网页上的下拉列表都会出现它。
+`python -m agentcode run --agent my_agent` 和网页上的智能体列表都会出现它。
 `agentcode/agents/echo.py` 是可运行的最小示例。
 
 ### 新增一个工具
@@ -150,7 +154,7 @@ def add(a: str, b: str) -> str:
 ### 新增一个中间件
 
 继承 `agentcode.middleware.base.Middleware`，覆盖 `wrap_llm` / `wrap_tool` 返回新的调用函数即可。
-框架自带日志、指数退避重试、超时与 token 统计四个中间件；网页的"正在调用模型…"提示也是这么实现的。
+框架自带日志、指数退避重试、超时与 token 统计四个中间件；网页的进度提示也是这么实现的。
 
 ## 配置说明
 
