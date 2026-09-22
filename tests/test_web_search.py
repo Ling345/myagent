@@ -86,7 +86,8 @@ def test_knowledge_graph_used_when_no_answer_box(fake_serpapi):
     assert web_search("北京", api_key="k") == "北京是中国的首都"
 
 
-def test_organic_results_include_title_snippet_and_link(fake_serpapi):
+def test_organic_results_have_no_source_link(fake_serpapi):
+    """结果里不带链接：模型会把链接照抄进最终答案，而答案要保持干净。"""
     fake_serpapi(
         {
             "organic_results": [
@@ -97,8 +98,10 @@ def test_organic_results_include_title_snippet_and_link(fake_serpapi):
     )
     output = web_search("测试", api_key="k")
     assert "[1] 第一条" in output
-    assert "来源：https://example.com/a" in output
+    assert "摘要一" in output
     assert "[2] 第二条" in output
+    assert "来源" not in output
+    assert "https://" not in output
 
 
 def test_max_results_limits_output(fake_serpapi):

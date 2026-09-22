@@ -114,15 +114,11 @@ def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> 
     organic = results.get("organic_results") or []
     if not organic:
         return f"没有找到关于 '{query}' 的搜索结果。"
-    snippets = []
-    for index, item in enumerate(organic[:max_results], start=1):
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
-        block = f"[{index}] {title}\n{snippet}"
-        if link:
-            block += f"\n来源：{link}"
-        snippets.append(block)
+    # 不把链接放进结果：模型会照抄到最终答案里，而答案要保持干净
+    snippets = [
+        f"[{index}] {item.get('title', '')}\n{item.get('snippet', '')}"
+        for index, item in enumerate(organic[:max_results], start=1)
+    ]
     return "\n\n".join(snippets)
 
 
