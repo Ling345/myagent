@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+traces/
+*.log
+# 真实密钥文件绝不入库
+.env
+.env.local

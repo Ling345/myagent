@@ -1,0 +1,6 @@
+openai>=1.40.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+serpapi>=0.1.5
+rich>=13.7.0
+pytest>=8.0.0
