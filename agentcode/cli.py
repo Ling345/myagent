@@ -1,4 +1,4 @@
-"""命令行入口：run / list / config 三个子命令。"""
+"""命令行入口：run / web / list / config 四个子命令。"""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from agentcode.tools.builtin import register_builtin_tools, register_demo_tools
 _SEPARATOR = "=" * 48
 _THIN_SEPARATOR = "-" * 48
 _OBSERVATION_PREVIEW = 200
+_DEFAULT_WEB_PORT = 8000
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--quiet", action="store_true", help="不打印过程日志")
     run_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     run_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+    web_parser = subparsers.add_parser("web", help="启动本地可视化网页")
+    web_parser.add_argument("--host", default=None, help="监听地址，默认 127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=None, help="监听端口，默认 8000；填 0 表示随机")
+    web_parser.add_argument(
+        "--llm",
+        choices=["openai", "mock"],
+        default=None,
+        help="页面默认模型模式，默认 mock",
+    )
+    web_parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    web_parser.add_argument("--verbose", action="store_true", help="打印访问日志")
+    web_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    web_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与内置工具")
     list_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
@@ -183,6 +198,25 @@ def _run_command(args: argparse.Namespace) -> int:
     return 0 if result.success else 1
 
 
+def _web_command(args: argparse.Namespace) -> int:
+    """执行 web 子命令：启动本地可视化页面。"""
+    from agentcode.web.server import DEFAULT_HOST, DEFAULT_PORT, serve
+
+    settings = _load_settings(args)
+    host = args.host or settings.extra.get("web_host") or DEFAULT_HOST
+    port = args.port if args.port is not None else int(settings.extra.get("web_port", DEFAULT_PORT))
+    llm_mode = args.llm or settings.extra.get("llm_mode") or "mock"
+    serve(
+        host=host,
+        port=port,
+        llm_mode=llm_mode,
+        env_file=args.env_file,
+        open_browser=args.open,
+        quiet=not args.verbose,
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行主函数，返回进程退出码。"""
     _use_utf8_stdout()
@@ -205,6 +239,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if settings.missing_keys():
                 print("提示：缺少必需项，使用真实模型前请先补齐 .env。")
             return 0
+
+        if args.command == "web":
+            return _web_command(args)
 
         return _run_command(args)
     except ConfigError as exc:

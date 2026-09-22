@@ -6,14 +6,19 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from agentcode.core.result import Step, TokenUsage
 
 
 @dataclass
 class RunContext:
-    """一次 ``run`` 调用期间共享的状态。"""
+    """一次 ``run`` 调用期间共享的状态。
+
+    ``on_step`` 是可选观察者：每记录一条步骤就会被调用一次。
+    网页端用它把步骤实时推给浏览器；观察者自身抛出的异常会被忽略，
+    以免展示层的问题影响智能体主流程。
+    """
 
     task: str = ""
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
@@ -21,6 +26,7 @@ class RunContext:
     steps: list[Step] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     extras: dict[str, Any] = field(default_factory=dict)
+    on_step: Callable[[Step], None] | None = None
     _monotonic: float = field(default_factory=time.monotonic, repr=False)
 
     def next_index(self) -> int:
@@ -28,8 +34,13 @@ class RunContext:
         return len(self.steps) + 1
 
     def add_step(self, step: Step) -> Step:
-        """追加一条步骤记录。"""
+        """追加一条步骤记录，并通知观察者。"""
         self.steps.append(step)
+        if self.on_step is not None:
+            try:
+                self.on_step(step)
+            except Exception:  # noqa: BLE001 - 观察者异常不影响主流程
+                pass
         return step
 
     def elapsed_ms(self) -> float:

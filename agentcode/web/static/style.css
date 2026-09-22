@@ -1,0 +1,402 @@
+/* AgentCode 网页样式：灰绿纸感 + 单一荧光黄高亮，不用阴影，只用 1px 细线 */
+
+:root {
+  --paper: #f0f1ed;
+  --sheet: #ffffff;
+  --ink: #12171a;
+  --ink-muted: #5f6866;
+  --rule: #c9cfc9;
+  --marker: #e8c63f;
+  --marker-soft: #f6eda6;
+  --font-ui: "PingFang SC", "Microsoft YaHei UI", "Source Han Sans SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--marker);
+  outline-offset: 2px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* ------------------------------------------------------------ 左侧控制栏 */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 32px 24px 28px;
+  border-right: 1px solid var(--rule);
+}
+
+.brand h1 {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.brand-note {
+  margin: 4px 0 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.group-label,
+.group legend {
+  margin: 0 0 8px;
+  padding: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.agent-option:hover {
+  border-color: var(--rule);
+}
+
+.agent-option input {
+  grid-row: span 2;
+  align-self: center;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+.agent-option:has(input:checked) {
+  border-color: var(--ink);
+  background: var(--sheet);
+}
+
+.agent-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.agent-desc {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  background: var(--sheet);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+textarea::placeholder {
+  color: var(--ink-muted);
+}
+
+.mode-switch {
+  display: flex;
+  gap: 16px;
+}
+
+.mode-switch label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.mode-switch input {
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+button {
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.primary {
+  padding: 10px 16px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.primary:hover:not(:disabled) {
+  background: #2b3438;
+  border-color: #2b3438;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.ghost {
+  padding: 8px 14px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+
+.ghost:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.run-status {
+  min-height: 20px;
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.rail-foot {
+  margin-top: auto;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+}
+
+.config {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  font-size: 12px;
+}
+
+.config dt {
+  color: var(--ink-muted);
+}
+
+.config dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- 轨迹区域 */
+
+.stream {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 32px 40px 48px;
+  background: var(--sheet);
+}
+
+.empty {
+  margin: auto 0;
+  max-width: 46ch;
+}
+
+.empty p {
+  margin: 0 0 6px;
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  animation: rise 180ms ease-out both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.step-index {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-muted);
+  padding-top: 2px;
+}
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 20px;
+  border-left: 1px solid var(--rule);
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.field-label {
+  color: var(--ink-muted);
+  font-size: 12px;
+  padding-top: 2px;
+}
+
+.field-value {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.field-action .field-value {
+  border-left: 3px solid var(--marker);
+  padding-left: 12px;
+}
+
+.field-error .field-value {
+  color: #9a3d16;
+}
+
+.step-meta {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.annotation {
+  margin: 0 0 8px;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.answer {
+  padding: 20px 24px;
+  background: var(--marker-soft);
+  border-left: 3px solid var(--marker);
+}
+
+.answer-text {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  max-width: 78ch;
+}
+
+.meta {
+  margin: 12px 0 0;
+  color: #5c5726;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.failure {
+  padding: 18px 22px;
+  border: 1px solid #c9a08a;
+  border-left: 3px solid #b4571f;
+  background: #fbf3ee;
+}
+
+.failure p:last-child {
+  margin: 0;
+  max-width: 78ch;
+}
+
+.stream-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 20px;
+}
+
+/* ------------------------------------------------------------ 窄屏适配 */
+
+@media (max-width: 880px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    gap: 22px;
+  }
+
+  .rail-foot {
+    margin-top: 0;
+  }
+
+  .stream {
+    padding: 24px 20px 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step {
+    animation: none;
+  }
+}

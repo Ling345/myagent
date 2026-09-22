@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentCode · 推理轨迹</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="rail">
+        <header class="brand">
+          <h1>AgentCode</h1>
+          <p class="brand-note">看它怎么一步步推理</p>
+        </header>
+
+        <form id="run-form" class="controls" novalidate>
+          <fieldset class="group">
+            <legend>智能体</legend>
+            <div id="agent-list" class="agent-list"></div>
+          </fieldset>
+
+          <div class="group">
+            <label class="group-label" for="task">任务</label>
+            <textarea
+              id="task"
+              name="task"
+              rows="4"
+              placeholder="例如：查一下北京今天的天气，再推荐一个景点"
+            ></textarea>
+          </div>
+
+          <fieldset class="group">
+            <legend>模型</legend>
+            <div class="mode-switch">
+              <label>
+                <input type="radio" name="llm" value="mock" checked />
+                <span>离线演示</span>
+              </label>
+              <label>
+                <input type="radio" name="llm" value="openai" />
+                <span>真实模型</span>
+              </label>
+            </div>
+            <p class="hint">
+              离线演示用内置假数据，不消耗额度；真实模型会调用 .env 里配置的服务。
+            </p>
+          </fieldset>
+
+          <button type="submit" id="run-button" class="primary">运行</button>
+          <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
+        </form>
+
+        <footer class="rail-foot">
+          <dl id="config-list" class="config"></dl>
+        </footer>
+      </aside>
+
+      <main class="stream">
+        <div class="empty" id="empty">
+          <p>在左侧选一个智能体，写下任务，然后点运行。</p>
+          <p class="hint">
+            这里会逐步显示它的每一步：思考、调用的工具、工具返回的观察，最后给出答案。
+          </p>
+        </div>
+
+        <ol class="steps" id="steps" hidden></ol>
+
+        <section class="answer" id="answer" hidden>
+          <p class="annotation">最终答案</p>
+          <p class="answer-text" id="answer-text"></p>
+          <p class="meta" id="answer-meta"></p>
+        </section>
+
+        <section class="failure" id="failure" hidden>
+          <p class="annotation">没能完成</p>
+          <p id="failure-text"></p>
+        </section>
+
+        <div class="stream-actions">
+          <button type="button" id="export-button" class="ghost" disabled>导出轨迹 JSON</button>
+          <button type="button" id="clear-button" class="ghost">清空</button>
+        </div>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
