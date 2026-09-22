@@ -114,25 +114,27 @@ def test_agent_session_store_evicts_oldest():
     for name in ("s1", "s2", "s3"):
         store.get(name, _agent)
 
-    assert store.session_ids() == ["s2", "s3"]
+    # 会话列表按最近使用排序，最旧的 s1 已被淘汰
+    assert store.session_ids() == ["s3", "s2"]
     assert "s1" not in store
 
 
-def test_agent_session_reset_drops_instance():
+def test_agent_session_reset_clears_memory_but_keeps_session():
     store = AgentSessionStore()
     agent = store.get("s1", _agent)
     agent.run("北京天气如何")
     assert store.turns("s1") == 1
 
     assert store.reset("s1") is True
-    assert store.reset("s1") is False
+    assert store.reset("s1") is True  # 会话还在，可以再次清空
     assert store.get("s1", _agent).memory.get_messages() == []
+    assert store.reset("没这个会话") is False
 
 
-def test_agent_session_rejects_empty_id():
+def test_agent_session_with_empty_id_creates_fresh_session():
     store = AgentSessionStore()
-    with pytest.raises(ValueError):
-        store.get("", _agent)
+    assert store.get("", _agent) is not None
+    assert len(store) == 1
 
 
 # ------------------------------------------------------------- 磁盘会话

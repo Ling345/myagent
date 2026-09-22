@@ -292,6 +292,7 @@ def _web_command(args: argparse.Namespace) -> int:
         open_browser=getattr(args, "open", False),
         quiet=not args.verbose,
         max_sessions=settings.max_sessions,
+        session_dir=settings.web_session_dir,
     )
     return 0
 
@@ -319,6 +320,7 @@ def _open_command(args: argparse.Namespace) -> int:
         open_browser=not args.no_browser,
         quiet=not args.verbose,
         max_sessions=settings.max_sessions,
+        session_dir=settings.web_session_dir,
     )
     return 0
 

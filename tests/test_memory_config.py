@@ -26,11 +26,13 @@ def test_config_defaults_match_component_defaults():
     """配置里的默认值必须与各组件自身的默认值一致，避免悄悄漂移。"""
     from agentcode.core.agent import DEFAULT_MEMORY_TURNS as agent_default
     from agentcode.memory.session_store import DEFAULT_MAX_TURNS as store_default
+    from agentcode.web.sessions import DEFAULT_SESSION_DIR as web_dir_default
     from agentcode.web.sessions import DEFAULT_MAX_SESSIONS as session_default
 
     assert Settings().memory_turns == agent_default
     assert Settings().memory_turns == store_default
     assert Settings().max_sessions == session_default
+    assert Settings().web_session_dir == web_dir_default
 
 
 def test_env_overrides_memory_values(monkeypatch, tmp_path):

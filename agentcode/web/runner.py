@@ -31,7 +31,7 @@ from agentcode.tools import (
     register_code_tools,
     register_demo_tools,
 )
-from agentcode.web.sessions import AgentSessionStore
+from agentcode.web.sessions import SessionStore
 
 Event = dict[str, Any]
 Emitter = Callable[[Event], None]
@@ -118,13 +118,13 @@ def run_stream(
     llm_mode: str = "mock",
     max_steps: int | None = None,
     settings: Settings | None = None,
-    session_store: AgentSessionStore | None = None,
+    session_store: SessionStore | None = None,
     session_id: str | None = None,
 ) -> Iterator[Event]:
     """在后台线程里执行智能体，把事件按发生顺序逐条产出。
 
-    带上 ``session_store`` 与 ``session_id`` 时复用同一个智能体实例，
-    上下文记忆因此可以在多次提问之间延续。
+    带上 ``session_store`` 与 ``session_id`` 时复用同一个智能体实例（记忆延续），
+    并把这一问一答记进会话记录，方便之后切回来看。
     """
     events: queue.Queue[Event | None] = queue.Queue()
 
@@ -143,7 +143,9 @@ def run_stream(
                 agent = session_store.get(
                     session_id,
                     lambda: create_backend(agent_name, llm_mode, active_settings, max_steps),
+                    max_turns=active_settings.memory_turns,
                 )
+                session_store.append_message(session_id, "user", task)
             else:
                 agent = create_backend(agent_name, llm_mode, active_settings, max_steps)
 
@@ -155,6 +157,15 @@ def run_stream(
             payload["memory_turns"] = len(agent.memory)
             payload["memory_limit"] = agent.memory.max_turns
             payload["turn_index"] = agent.memory.total_turns
+            payload["session_id"] = session_id
+
+            if session_store is not None and session_id:
+                session_store.append_message(
+                    session_id,
+                    "assistant",
+                    result.answer or (result.error or "（未得出结论）"),
+                    success=result.success,
+                )
             emit({"type": "answer", "data": payload})
         except AgentCodeError as exc:
             emit({"type": "error", "data": {"message": str(exc)}})

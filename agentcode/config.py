@@ -28,6 +28,8 @@ DEFAULT_SEARCH_LEVELS = 3
 #: 由 tests/test_memory_config.py 守住）
 DEFAULT_MEMORY_TURNS = 5
 DEFAULT_MAX_SESSIONS = 20
+#: 网页会话落盘目录（须与 web.sessions 的默认值一致）
+DEFAULT_WEB_SESSION_DIR = "traces/web-sessions"
 
 #: 受限代码执行的默认值
 DEFAULT_CODE_ROOT = "traces/sandbox"
@@ -99,6 +101,7 @@ class Settings:
     trace_dir: str = DEFAULT_TRACE_DIR
     memory_turns: int = DEFAULT_MEMORY_TURNS
     max_sessions: int = DEFAULT_MAX_SESSIONS
+    web_session_dir: str = DEFAULT_WEB_SESSION_DIR
     code_root: str = DEFAULT_CODE_ROOT
     code_timeout: float = DEFAULT_CODE_TIMEOUT
     code_output_limit: int = DEFAULT_CODE_OUTPUT_LIMIT
@@ -148,6 +151,7 @@ class Settings:
             trace_dir=str(pick("AGENT_TRACE_DIR", DEFAULT_TRACE_DIR)),
             memory_turns=_to_int(pick("AGENT_MEMORY_TURNS"), DEFAULT_MEMORY_TURNS),
             max_sessions=_to_int(pick("AGENT_MAX_SESSIONS"), DEFAULT_MAX_SESSIONS),
+            web_session_dir=str(pick("AGENT_WEB_SESSION_DIR", DEFAULT_WEB_SESSION_DIR)),
             code_root=str(pick("AGENT_CODE_ROOT", DEFAULT_CODE_ROOT)),
             code_timeout=_to_float(pick("AGENT_CODE_TIMEOUT"), DEFAULT_CODE_TIMEOUT),
             code_output_limit=_to_int(pick("AGENT_CODE_OUTPUT_LIMIT"), DEFAULT_CODE_OUTPUT_LIMIT),
@@ -222,6 +226,7 @@ class Settings:
             "AGENT_CODING_STEPS": str(self.coding_steps),
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
             "AGENT_MAX_SESSIONS": str(self.max_sessions),
+            "AGENT_WEB_SESSION_DIR": self.web_session_dir,
             "AGENT_CODE_ROOT": self.code_root,
             "AGENT_CODE_TIMEOUT": str(self.code_timeout),
             "AGENT_TRACE_DIR": self.trace_dir,

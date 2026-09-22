@@ -11,6 +11,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.config import DEFAULT_MAX_SESSIONS, Settings
@@ -21,7 +22,7 @@ from agentcode.tools import (
     register_code_tools,
     register_demo_tools,
 )
-from agentcode.web.sessions import AgentSessionStore
+from agentcode.web.sessions import SessionStore, default_session_dir
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 64 * 1024
@@ -174,13 +175,37 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/config":
             self._send_json(config_payload(self._settings()))
             return
+        if path == "/api/sessions":
+            store: SessionStore = self.server.sessions  # type: ignore[attr-defined]
+            self._send_json({"sessions": store.list()})
+            return
+        if path == "/api/session":
+            store = self.server.sessions  # type: ignore[attr-defined]
+            query = parse_qs(urlsplit(self.path).query)
+            session_id = (query.get("id") or [""])[0]
+            record = store.record(session_id) if session_id else None
+            self._send_json(
+                {
+                    "session": record.summary() if record is not None else None,
+                    "messages": [dict(message) for message in record.messages]
+                    if record is not None
+                    else [],
+                }
+            )
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
     def do_POST(self) -> None:  # noqa: N802 - 父类约定的方法名
         from agentcode.web.runner import run_stream  # 延迟导入，避免循环依赖
 
         path = self.path.split("?", 1)[0]
-        if path not in ("/api/run", "/api/session/reset"):
+        if path not in (
+            "/api/run",
+            "/api/session/reset",
+            "/api/sessions/create",
+            "/api/sessions/rename",
+            "/api/sessions/delete",
+        ):
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
             return
 
@@ -188,13 +213,33 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if payload is None:
             return
 
-        session_store: AgentSessionStore = self.server.sessions  # type: ignore[attr-defined]
+        session_store: SessionStore = self.server.sessions  # type: ignore[attr-defined]
         raw_session = str(payload.get("session_id") or "").strip()
         session_id = raw_session or None
 
         if path == "/api/session/reset":
             removed = session_store.reset(session_id) if session_id else False
             self._send_json({"reset": removed, "session_id": session_id})
+            return
+
+        if path == "/api/sessions/create":
+            record = session_store.create(name=payload.get("name"))
+            self._send_json({"session": record.summary()})
+            return
+
+        if path == "/api/sessions/rename":
+            renamed = session_store.rename(session_id or "", payload.get("name"))
+            record = session_store.record(session_id or "")
+            self._send_json(
+                {
+                    "renamed": renamed,
+                    "session": record.summary() if record is not None else None,
+                }
+            )
+            return
+
+        if path == "/api/sessions/delete":
+            self._send_json({"deleted": session_store.delete(session_id or "")})
             return
 
         task = str(payload.get("task") or "").strip()
@@ -251,6 +296,7 @@ def create_server(
     env_file: str | None = None,
     quiet: bool = True,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
+    session_dir: str | None = None,
 ) -> ThreadingHTTPServer:
     """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。"""
     server = ThreadingHTTPServer((host, port), AgentCodeRequestHandler)
@@ -258,7 +304,9 @@ def create_server(
     server.llm_mode = llm_mode  # type: ignore[attr-defined]
     server.env_file = env_file  # type: ignore[attr-defined]
     server.quiet = quiet  # type: ignore[attr-defined]
-    server.sessions = AgentSessionStore(max_sessions=max_sessions)  # type: ignore[attr-defined]
+    server.sessions = SessionStore(  # type: ignore[attr-defined]
+        directory=session_dir or default_session_dir(), max_sessions=max_sessions
+    )
     return server
 
 
@@ -271,6 +319,7 @@ def serve(
     open_browser: bool = False,
     quiet: bool = True,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
+    session_dir: str | None = None,
 ) -> None:
     """启动网页服务并阻塞，直到用户按 Ctrl+C。"""
     try:
@@ -281,6 +330,7 @@ def serve(
             env_file=env_file,
             quiet=quiet,
             max_sessions=max_sessions,
+            session_dir=session_dir,
         )
     except OSError as exc:
         print(f"启动失败：{host}:{port} 无法监听（{exc}）。")
