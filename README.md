@@ -77,8 +77,20 @@ D:\Anaconda\python.exe -m agentcode run --task "我最喜欢的城市是哪个�
 `open` 会先探测端口：已经在运行就直接打开浏览器，没运行就以当前窗口启动服务并打开浏览器。
 服务地址默认 `http://127.0.0.1:8000/`。**这个窗口就是服务本身**，关掉窗口（或按 Ctrl+C）服务就停了。
 
-页面**只给结果**：左侧选智能体、填任务、选模型，点运行后先显示进度计时，结束后直接给出荧光黄标注的最终答案，
-没有推理过程、思考内容或工具调用记录的任何入口。想拿完整执行记录时，点「导出完整结果 JSON」可以得到每一步的原始数据。
+页面**只给结果**，并且**只走真实模型**：左侧选智能体、写下任务、点运行，屏幕上先显示进度计时，
+结束后直接给出荧光黄标注的最终答案，没有推理过程、思考内容或工具调用记录的任何入口，
+也没有「离线演示 / 真实模型」这类选择——它调用的就是 `.env` 里配置的那个模型。
+想拿完整执行记录时，点「导出完整结果 JSON」可以得到每一步的原始数据。
+
+需要离线跑（没有密钥、或者不想消耗额度）时用命令行或显式参数：
+
+```powershell
+# 命令行离线演示
+D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "北京天气如何"
+
+# 用离线模型启动网页（主要用于自动化测试与演示，页面上不做区分）
+D:\Anaconda\python.exe -m agentcode web --llm mock
+```
 
 实现上分成两层：`agentcode/web/runner.py` 把一次运行变成事件流（`status` / `step` / `answer` / `error`），
 `agentcode/web/server.py` 用标准库 `http.server` 把它以 SSE 推给浏览器。整个过程**不新增任何依赖**，
@@ -209,7 +221,7 @@ def add(a: str, b: str) -> str:
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖默认智能体、步数、温度、记忆轮数等字段，
-网页也可以用 `web_host`、`web_port`、`llm_mode` 三个字段设默认值。
+网页也可以用 `web_host`、`web_port`、`llm_mode` 三个字段设默认值（`llm_mode` 默认 `openai`）。
 `.env` 的查找顺序是：显式传入的路径 → 当前目录向上最多三层 → 进程环境变量。
 密钥永不写入源码，`config` 子命令与网页配置面板输出时都自动脱敏。
 
@@ -219,10 +231,11 @@ def add(a: str, b: str) -> str:
 D:\Anaconda\python.exe -m pytest -q
 ```
 
-130 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
+136 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
 其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证，上下文记忆覆盖了
 「第二轮提示词里能看到第一轮的答案」「超限裁剪」「真实轮次不回退」「会话隔离」
-「新会话清空」「磁盘会话读写」「`AGENT_MEMORY_TURNS` 与 `--memory-turns` 生效」。
+「新会话清空」「磁盘会话读写」「`AGENT_MEMORY_TURNS` 与 `--memory-turns` 生效」，
+另外有一组测试守住"页面不再出现离线演示选项"。
 
 ## 设计文档与实现计划
 

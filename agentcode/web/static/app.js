@@ -133,7 +133,7 @@ function renderConfig(config) {
   if (!config.ready) {
     const note = document.createElement("p");
     note.className = "hint";
-    note.textContent = `缺少 ${config.missing_keys.join("、")}，用真实模型前请先补齐 .env；离线演示不受影响。`;
+    note.textContent = `缺少 ${config.missing_keys.join("、")}，请先补齐 .env，否则运行会失败。`;
     els.configList.after(note);
   }
 }
@@ -151,10 +151,8 @@ async function submitRun(event) {
     return;
   }
 
-  const data = new FormData(els.form);
   const payload = {
-    agent: data.get("agent"),
-    llm: data.get("llm"),
+    agent: new FormData(els.form).get("agent"),
     task,
     session_id: sessionId(),
   };
@@ -292,7 +290,7 @@ function showAnswer(result) {
 function showFailure(message) {
   els.empty.hidden = true;
   els.failure.hidden = false;
-  els.failureText.textContent = `${message} 可以换成离线演示再试，或检查左侧的配置。`;
+  els.failureText.textContent = `${message} 请检查左侧面板里的模型、接口与密钥。`;
   els.runStatus.textContent = "失败";
 }
 

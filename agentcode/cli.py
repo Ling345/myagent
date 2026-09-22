@@ -29,6 +29,8 @@ from agentcode.tools.builtin import register_builtin_tools, register_demo_tools
 _SEPARATOR = "=" * 48
 _THIN_SEPARATOR = "-" * 48
 _OBSERVATION_PREVIEW = 200
+#: 网页默认使用的模型模式；离线演示只在显式传 --llm mock 时启用
+_DEFAULT_WEB_MODE = "openai"
 
 
 def _add_web_arguments(parser: argparse.ArgumentParser) -> None:
@@ -41,7 +43,7 @@ def _add_web_arguments(parser: argparse.ArgumentParser) -> None:
         "--llm",
         choices=["openai", "mock"],
         default=None,
-        help="页面默认模型模式，默认 mock",
+        help="模型模式，默认 openai；mock 仅供离线演示与自动化测试",
     )
     parser.add_argument("--verbose", action="store_true", help="打印访问日志")
     parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
@@ -131,12 +133,12 @@ def _load_settings(args: argparse.Namespace) -> Settings:
 
 
 def _web_target(args: argparse.Namespace, settings: Settings) -> tuple[str, int, str]:
-    """解析网页服务的地址、端口与默认模型模式。"""
+    """解析网页服务的地址、端口与模型模式。"""
     from agentcode.web.server import DEFAULT_HOST, DEFAULT_PORT
 
     host = args.host or settings.extra.get("web_host") or DEFAULT_HOST
     port = args.port if args.port is not None else int(settings.extra.get("web_port", DEFAULT_PORT))
-    llm_mode = args.llm or settings.extra.get("llm_mode") or "mock"
+    llm_mode = args.llm or settings.extra.get("llm_mode") or _DEFAULT_WEB_MODE
     return host, port, llm_mode
 
 

@@ -31,23 +31,6 @@
             ></textarea>
           </div>
 
-          <fieldset class="group">
-            <legend>模型</legend>
-            <div class="mode-switch">
-              <label>
-                <input type="radio" name="llm" value="mock" checked />
-                <span>离线演示</span>
-              </label>
-              <label>
-                <input type="radio" name="llm" value="openai" />
-                <span>真实模型</span>
-              </label>
-            </div>
-            <p class="hint">
-              离线演示用内置假数据，不消耗额度；真实模型会调用 .env 里配置的服务。
-            </p>
-          </fieldset>
-
           <button type="submit" id="run-button" class="primary">运行</button>
           <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
 
