@@ -25,6 +25,7 @@ from agentcode.middleware import (
 )
 from agentcode.tools.base import ToolRegistry
 from agentcode.tools.builtin import register_builtin_tools, register_demo_tools
+from agentcode.tools.code import register_code_tools
 
 _SEPARATOR = "=" * 48
 _THIN_SEPARATOR = "-" * 48
@@ -54,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
     parser = argparse.ArgumentParser(
         prog="agentcode",
-        description="可扩展的 Python 智能体框架（ReAct / Plan-and-Solve / Reflection）",
+        description="可扩展的 Python 智能体框架（ReAct / Plan-and-Solve / Reflection / Coding）",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -67,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="openai",
         help="模型后端；mock 为离线演示，不消耗额度",
     )
-    run_parser.add_argument("--max-steps", type=int, default=None, help="最大步数")
+    run_parser.add_argument("--max-steps", type=int, default=None, help="覆盖最大步数")
     run_parser.add_argument(
         "--memory-turns", type=int, default=None, help="上下文记忆保留几轮，默认取配置"
     )
@@ -95,7 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true", help="只确保服务在运行，不打开浏览器"
     )
 
-    list_parser = subparsers.add_parser("list", help="列出已注册的智能体与内置工具")
+    list_parser = subparsers.add_parser("list", help="列出已注册的智能体与工具")
+    list_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     list_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
     config_parser = subparsers.add_parser("config", help="显示解析后的配置（密钥脱敏）")
@@ -122,10 +124,11 @@ def _load_settings(args: argparse.Namespace) -> Settings:
     config_path = getattr(args, "config", None)
     if config_path:
         settings = settings.apply_overrides(JsonStore.load(config_path))
-    overrides = {}
+    overrides: dict[str, Any] = {}
     max_steps = getattr(args, "max_steps", None)
     if max_steps:
-        overrides["max_steps"] = max_steps
+        # 显式指定步数时对循环类智能体一并生效
+        overrides.update({"max_steps": max_steps, "coding_steps": max_steps})
     memory_turns = getattr(args, "memory_turns", None)
     if memory_turns:
         overrides["memory_turns"] = memory_turns
@@ -151,12 +154,20 @@ def _session_dir(args: argparse.Namespace, settings: Settings) -> str:
     )
 
 
-def _build_tools(mock: bool) -> ToolRegistry:
-    """按后端类型准备工具集。"""
+def _build_tools(mock: bool, settings: Settings, create_root: bool = True) -> ToolRegistry:
+    """按后端类型准备工具集：真实模式下额外提供受限代码工具。"""
     registry = ToolRegistry()
     register_builtin_tools(registry, include_search=not mock)
     if mock:
         register_demo_tools(registry)
+        return registry
+    register_code_tools(
+        registry,
+        root=settings.code_root,
+        timeout=settings.code_timeout,
+        output_limit=settings.code_output_limit,
+        create=create_root,
+    )
     return registry
 
 
@@ -235,18 +246,18 @@ def _run_command(args: argparse.Namespace) -> int:
 
     if args.llm == "mock":
         llm = demo_responses_llm(agent_name)
-        tools = _build_tools(mock=True)
+        tools = _build_tools(mock=True, settings=settings)
     else:
         settings.validate()
         llm = OpenAICompatibleLLM.from_settings(settings)
-        tools = _build_tools(mock=False)
+        tools = _build_tools(mock=False, settings=settings)
 
     agent = default_registry.create(
         agent_name,
         llm=llm,
         tools=tools,
         middlewares=_build_middlewares(settings, quiet=args.quiet),
-        max_steps=settings.max_steps,
+        max_steps=settings.max_steps_for(agent_name),
         memory=memory,
     )
     if session_store and len(agent.memory):
@@ -320,10 +331,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "list":
+            settings = _load_settings(args)
             print("可用智能体：")
             print(default_registry.describe())
             print("\n可用工具：")
-            print(_build_tools(mock=False).describe())
+            print(_build_tools(mock=False, settings=settings, create_root=False).describe())
             return 0
 
         if args.command == "config":

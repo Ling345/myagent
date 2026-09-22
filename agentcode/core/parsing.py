@@ -18,14 +18,17 @@ _CALL_PATTERN = re.compile(rf"^{_NAME}\s*\((.*)\)\s*$", re.DOTALL)
 _BARE_NAME_PATTERN = re.compile(rf"^{_NAME}$")
 _FENCE_PATTERN = re.compile(r"```(?:python|py|json)?\s*(.*?)```", re.DOTALL)
 _LIST_PREFIX_PATTERN = re.compile(r"^\s*(?:[-*•]|\d+\s*[.、)]|\(\d+\))\s*")
+#: 模型有时会在 Action 后面顺手编一段 Observation，解析时要切掉
+_OBSERVATION_SUFFIX_PATTERN = re.compile(r"\n\s*(?:Observation|观察)[:：].*$", re.DOTALL)
 
 #: 按行兜底解析时，至少需要这么多行才认为它是一份计划
 _MIN_FALLBACK_STEPS = 2
 
 
 def _clean_action(action: str) -> str:
-    """去掉模型顺手输出的代码围栏残留与首尾空白。"""
+    """清掉模型顺手输出的 Observation 后缀与代码围栏残留。"""
     text = action.strip()
+    text = _OBSERVATION_SUFFIX_PATTERN.sub("", text)
     if text.endswith("```"):
         text = text[:-3].strip()
     return text.strip()

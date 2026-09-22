@@ -5,6 +5,8 @@
 - 工具执行失败不抛异常，而是返回中文错误字符串，
   这样智能体循环可以把错误当作 Observation 继续推理。
 - ``invoke`` 同时支持 ``工具名[字符串参数]`` 与 ``工具名(key=value)`` 两种调用形态。
+- 引号包裹的参数会还原常用转义（``\\n``、``\\t``、``\\"`` 等），
+  这样模型写 ``content="第一行\\n第二行"`` 时能真的换行。
 """
 
 from __future__ import annotations
@@ -14,6 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from agentcode.core.errors import ToolError
+
+#: 引号内允许还原的转义序列
+_ESCAPE_MAP = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "'": "'", "\\": "\\"}
+_ESCAPE_PATTERN = re.compile(r"\\(.)", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -41,13 +47,20 @@ class ToolSpec:
 
 
 def _split_top_level(text: str) -> list[str]:
-    """按顶层逗号切分字符串，忽略引号内的逗号。"""
+    """按顶层逗号切分字符串，忽略引号内的逗号（含被转义的引号）。"""
     parts: list[str] = []
     buffer: list[str] = []
     quote: str | None = None
+    escaped = False
     for char in text:
         if quote:
             buffer.append(char)
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\":
+                escaped = True
+                continue
             if char == quote:
                 quote = None
             continue
@@ -64,11 +77,22 @@ def _split_top_level(text: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def _unescape(value: str) -> str:
+    """还原常用转义序列；不认识的转义原样保留。"""
+    return _ESCAPE_PATTERN.sub(
+        lambda match: _ESCAPE_MAP.get(match.group(1), match.group(0)), value
+    )
+
+
 def _unquote(value: str) -> str:
-    """去掉最外层成对的引号。"""
+    """去掉最外层成对的引号，并还原其中的转义序列。
+
+    只有被引号包裹的值才还原转义，避免把 ``traces\\new`` 这类未加引号的
+    Windows 路径误伤成换行。
+    """
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-        return value[1:-1]
+        return _unescape(value[1:-1])
     return value
 
 

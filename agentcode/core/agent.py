@@ -24,12 +24,17 @@ class BaseAgent(ABC):
     子类只需要实现 :meth:`run`，并使用 :meth:`_think` / :meth:`_call_tool`
     发起调用，即可自动获得中间件、用量统计与轨迹记录能力；
     在给出最终答案时调用 :meth:`_remember`，上下文记忆就会延续到下一轮。
+
+    子类可以用 ``default_max_steps`` 声明自己需要的默认步数
+    （例如写代码的智能体需要比闲聊更多的步数）。
     """
 
     #: 注册表中使用的名称
     name: str = "base"
     #: 一句话说明，用于 CLI 展示与提示词
     description: str = "基础智能体"
+    #: 未显式指定步数时使用的默认值
+    default_max_steps: int = DEFAULT_MAX_STEPS
 
     def __init__(
         self,
@@ -48,7 +53,7 @@ class BaseAgent(ABC):
         self.memory = (
             memory if memory is not None else ShortTermMemory(max_turns=DEFAULT_MEMORY_TURNS)
         )
-        self.max_steps = max_steps or DEFAULT_MAX_STEPS
+        self.max_steps = max_steps or type(self).default_max_steps or DEFAULT_MAX_STEPS
         self.temperature = temperature
         if name:
             self.name = name

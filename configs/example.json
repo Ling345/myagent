@@ -1,8 +1,11 @@
 {
   "agent": "react",
   "max_steps": 6,
+  "coding_steps": 20,
   "temperature": 0.0,
   "trace_dir": "traces",
   "memory_turns": 5,
-  "max_sessions": 20
+  "max_sessions": 20,
+  "code_root": "traces/sandbox",
+  "code_timeout": 10
 }

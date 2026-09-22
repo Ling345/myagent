@@ -4,12 +4,14 @@
 即可在 ``default_registry`` 中看到它们。
 """
 
+from agentcode.agents.coding import CodingAgent
 from agentcode.agents.echo import EchoAgent
 from agentcode.agents.plan_and_solve import Executor, PlanAndSolveAgent, Planner
 from agentcode.agents.react import ReActAgent
 from agentcode.agents.reflection import ReflectionAgent
 
 __all__ = [
+    "CodingAgent",
     "EchoAgent",
     "Executor",
     "PlanAndSolveAgent",

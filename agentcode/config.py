@@ -29,6 +29,13 @@ DEFAULT_SEARCH_LEVELS = 3
 DEFAULT_MEMORY_TURNS = 5
 DEFAULT_MAX_SESSIONS = 20
 
+#: 受限代码执行的默认值
+DEFAULT_CODE_ROOT = "traces/sandbox"
+DEFAULT_CODE_TIMEOUT = 10.0
+DEFAULT_CODE_OUTPUT_LIMIT = 4000
+#: 写代码需要比闲聊更多的步数（须与 agents.coding 的默认值一致）
+DEFAULT_CODING_STEPS = 20
+
 
 def mask_secret(value: str | None) -> str:
     """对密钥做脱敏展示：保留首尾各 4 位。"""
@@ -92,6 +99,10 @@ class Settings:
     trace_dir: str = DEFAULT_TRACE_DIR
     memory_turns: int = DEFAULT_MEMORY_TURNS
     max_sessions: int = DEFAULT_MAX_SESSIONS
+    code_root: str = DEFAULT_CODE_ROOT
+    code_timeout: float = DEFAULT_CODE_TIMEOUT
+    code_output_limit: int = DEFAULT_CODE_OUTPUT_LIMIT
+    coding_steps: int = DEFAULT_CODING_STEPS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -137,6 +148,10 @@ class Settings:
             trace_dir=str(pick("AGENT_TRACE_DIR", DEFAULT_TRACE_DIR)),
             memory_turns=_to_int(pick("AGENT_MEMORY_TURNS"), DEFAULT_MEMORY_TURNS),
             max_sessions=_to_int(pick("AGENT_MAX_SESSIONS"), DEFAULT_MAX_SESSIONS),
+            code_root=str(pick("AGENT_CODE_ROOT", DEFAULT_CODE_ROOT)),
+            code_timeout=_to_float(pick("AGENT_CODE_TIMEOUT"), DEFAULT_CODE_TIMEOUT),
+            code_output_limit=_to_int(pick("AGENT_CODE_OUTPUT_LIMIT"), DEFAULT_CODE_OUTPUT_LIMIT),
+            coding_steps=_to_int(pick("AGENT_CODING_STEPS"), DEFAULT_CODING_STEPS),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -174,15 +189,23 @@ class Settings:
                 + "、".join(missing)
                 + "。请在 .env 中配置，或参考 .env.example。"
             )
-        if self.timeout <= 0:
-            raise ConfigError("LLM_TIMEOUT 必须大于 0。")
-        if self.max_steps <= 0:
-            raise ConfigError("AGENT_MAX_STEPS 必须大于 0。")
-        if self.memory_turns <= 0:
-            raise ConfigError("AGENT_MEMORY_TURNS 必须大于 0。")
-        if self.max_sessions <= 0:
-            raise ConfigError("AGENT_MAX_SESSIONS 必须大于 0。")
+        limits = {
+            "LLM_TIMEOUT": self.timeout,
+            "AGENT_MAX_STEPS": self.max_steps,
+            "AGENT_MEMORY_TURNS": self.memory_turns,
+            "AGENT_MAX_SESSIONS": self.max_sessions,
+            "AGENT_CODE_TIMEOUT": self.code_timeout,
+            "AGENT_CODE_OUTPUT_LIMIT": self.code_output_limit,
+            "AGENT_CODING_STEPS": self.coding_steps,
+        }
+        for name, value in limits.items():
+            if value <= 0:
+                raise ConfigError(f"{name} 必须大于 0。")
         return self
+
+    def max_steps_for(self, agent_name: str) -> int:
+        """按智能体选择步数上限：写代码比闲聊需要更多步。"""
+        return self.coding_steps if agent_name == "coding" else self.max_steps
 
     # ------------------------------------------------------------------ 展示
 
@@ -196,8 +219,11 @@ class Settings:
             "LLM_TIMEOUT": str(self.timeout),
             "LLM_TEMPERATURE": str(self.temperature),
             "AGENT_MAX_STEPS": str(self.max_steps),
+            "AGENT_CODING_STEPS": str(self.coding_steps),
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
             "AGENT_MAX_SESSIONS": str(self.max_sessions),
+            "AGENT_CODE_ROOT": self.code_root,
+            "AGENT_CODE_TIMEOUT": str(self.code_timeout),
             "AGENT_TRACE_DIR": self.trace_dir,
             ".env 来源": self.env_file or "（未找到，使用进程环境变量）",
         }

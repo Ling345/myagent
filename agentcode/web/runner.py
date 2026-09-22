@@ -25,7 +25,12 @@ from agentcode.llm.openai_compatible import OpenAICompatibleLLM
 from agentcode.memory import ShortTermMemory
 from agentcode.middleware import RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
-from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
+from agentcode.tools import (
+    ToolRegistry,
+    register_builtin_tools,
+    register_code_tools,
+    register_demo_tools,
+)
 from agentcode.web.sessions import AgentSessionStore
 
 Event = dict[str, Any]
@@ -55,12 +60,21 @@ class EventMiddleware(Middleware):
         return wrapped
 
 
-def build_tools(mock: bool) -> ToolRegistry:
-    """按后端类型准备工具集。"""
+def build_tools(mock: bool, settings: Settings | None = None) -> ToolRegistry:
+    """按后端类型准备工具集（真实模式下额外提供受限代码工具）。"""
     registry = ToolRegistry()
     register_builtin_tools(registry, include_search=not mock)
     if mock:
         register_demo_tools(registry)
+        return registry
+
+    active = settings or Settings.from_env()
+    register_code_tools(
+        registry,
+        root=active.code_root,
+        timeout=active.code_timeout,
+        output_limit=active.code_output_limit,
+    )
     return registry
 
 
@@ -86,14 +100,14 @@ def create_backend(
     else:
         settings.validate()
         llm = OpenAICompatibleLLM.from_settings(settings)
-        tools = build_tools(mock=False)
+        tools = build_tools(mock=False, settings=settings)
 
     return default_registry.create(
         agent_name,
         llm=llm,
         tools=tools,
         memory=ShortTermMemory(max_turns=settings.memory_turns),
-        max_steps=max_steps or settings.max_steps,
+        max_steps=max_steps or settings.max_steps_for(agent_name),
     )
 
 
