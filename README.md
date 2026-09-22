@@ -1,7 +1,7 @@
 # AgentCode：可扩展的 Python 智能体框架
 
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
-新增一个智能体只需要**一个文件**加一个注册装饰器。
+新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，可以看着它一步步推理。
 
 内置三种经典范式：
 
@@ -18,23 +18,43 @@ D:\Anaconda\python.exe -m pip install -r requirements.txt
 # 2. 配置密钥：复制 .env.example 为 .env 并填写
 #    LLM_API_KEY / LLM_BASE_URL / LLM_MODEL_ID 为必填，SERPAPI_API_KEY 用于网页搜索
 
-# 3. 离线演示（不需要任何密钥，使用脚本化模型）
+# 3. 打开可视化网页（默认离线演示，不消耗额度）
+D:\Anaconda\python.exe -m agentcode web --open
+
+# 4. 命令行离线演示（不需要任何密钥）
 D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "帮我看看北京今天适合去哪里"
 
-# 4. 使用真实模型
+# 5. 命令行使用真实模型
 D:\Anaconda\python.exe -m agentcode run --agent react --task "帮我查一下北京天气并推荐景点" --trace traces/run.json
 
-# 5. 其它子命令
+# 6. 其它子命令
 D:\Anaconda\python.exe -m agentcode list
 D:\Anaconda\python.exe -m agentcode config
 ```
 
+## 可视化网页
+
+```powershell
+D:\Anaconda\python.exe -m agentcode web                 # 默认 http://127.0.0.1:8000
+D:\Anaconda\python.exe -m agentcode web --port 8080 --open
+D:\Anaconda\python.exe -m agentcode web --llm openai    # 页面默认选中真实模型
+```
+
+页面左侧选智能体、填任务、选模型，右侧按步骤实时出现轨迹：每一步的思考、调用的工具、
+工具返回的观察，最后是荧光黄标注的最终答案。运行结束后可以导出轨迹 JSON。
+
+实现上分成两层：`agentcode/web/runner.py` 把一次运行变成事件流（`status` / `step` / `answer` / `error`），
+`agentcode/web/server.py` 用标准库 `http.server` 把它以 SSE 推给浏览器。整个过程**不新增任何依赖**，
+前端是一个不依赖框架和构建步骤的页面。服务只监听 `127.0.0.1`，不做鉴权，请勿暴露到公网。
+
+轨迹的实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`，它和命令行模式共用同一套执行代码。
+
 ## 架构
 
 ```
-CLI (agentcode.cli)
-      │
-      ▼
+CLI (agentcode.cli)  ──  agentcode web  ──▶  Web 层 (agentcode.web)
+      │                                              │
+      ▼                                              ▼
 Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
       │
       ├──▶ BaseAgent (agentcode.core.agent) ──▶ Middleware 链（日志/重试/超时/用量）
@@ -56,6 +76,7 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
 | `agentcode/memory/` | 短期记忆、JSON 轨迹读写 |
 | `agentcode/middleware/` | 日志、重试、超时、token 统计 |
 | `agentcode/agents/` | ReAct、Plan-and-Solve、Reflection、Echo 示例 |
+| `agentcode/web/` | 本地网页：事件流运行器与零依赖 HTTP 服务 |
 | `tests/` | 全离线单元测试 |
 
 ## 三种范式的示例输出
@@ -112,7 +133,8 @@ class MyAgent(BaseAgent):
 ```
 
 在 `agentcode/agents/__init__.py` 中导入一次即完成注册，随后
-`python -m agentcode run --agent my_agent` 就能直接用。`agentcode/agents/echo.py` 是可运行的最小示例。
+`python -m agentcode run --agent my_agent` 和网页上的下拉列表都会出现它。
+`agentcode/agents/echo.py` 是可运行的最小示例。
 
 ### 新增一个工具
 
@@ -128,7 +150,7 @@ def add(a: str, b: str) -> str:
 ### 新增一个中间件
 
 继承 `agentcode.middleware.base.Middleware`，覆盖 `wrap_llm` / `wrap_tool` 返回新的调用函数即可。
-框架自带日志、指数退避重试、超时与 token 统计四个中间件。
+框架自带日志、指数退避重试、超时与 token 统计四个中间件；网页的"正在调用模型…"提示也是这么实现的。
 
 ## 配置说明
 
@@ -144,9 +166,10 @@ def add(a: str, b: str) -> str:
 | `AGENT_MAX_STEPS` | 否 | `6` | 智能体最大步数 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
-配置文件（`--config configs/example.json`）可以覆盖默认智能体、步数、温度等字段。
+配置文件（`--config configs/example.json`）可以覆盖默认智能体、步数、温度等字段，
+网页也可以用 `web_host`、`web_port`、`llm_mode` 三个字段设默认值。
 `.env` 的查找顺序是：显式传入的路径 → 当前目录向上最多三层 → 进程环境变量。
-密钥永不写入源码，`config` 子命令输出时自动脱敏。
+密钥永不写入源码，`config` 子命令与网页配置面板输出时都自动脱敏。
 
 ## 测试
 
@@ -154,7 +177,8 @@ def add(a: str, b: str) -> str:
 D:\Anaconda\python.exe -m pytest -q
 ```
 
-全部用例离线运行，不产生任何网络请求，也不消耗 API 额度。
+101 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
+其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证。
 
 ## 设计文档与实现计划
 
