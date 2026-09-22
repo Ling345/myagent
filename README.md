@@ -1,7 +1,7 @@
 # AgentCode：可扩展的 Python 智能体框架
 
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
-新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，默认只给结果，需要时可展开推理过程。
+新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，只给结果，不展示推理过程。
 
 内置三种经典范式：
 
@@ -18,8 +18,8 @@ D:\Anaconda\python.exe -m pip install -r requirements.txt
 # 2. 配置密钥：复制 .env.example 为 .env 并填写
 #    LLM_API_KEY / LLM_BASE_URL / LLM_MODEL_ID 为必填，SERPAPI_API_KEY 用于网页搜索
 
-# 3. 打开可视化网页（默认离线演示，不消耗额度）
-D:\Anaconda\python.exe -m agentcode web --open
+# 3. 打开网页（推荐：直接双击项目里的「启动网页.cmd」）
+D:\Anaconda\python.exe -m agentcode open
 
 # 4. 命令行离线演示（不需要任何密钥）
 D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "帮我看看北京今天适合去哪里"
@@ -32,31 +32,36 @@ D:\Anaconda\python.exe -m agentcode list
 D:\Anaconda\python.exe -m agentcode config
 ```
 
-## 可视化网页
+## 网站入口与网页
 
-```powershell
-D:\Anaconda\python.exe -m agentcode web                 # 默认 http://127.0.0.1:8000
-D:\Anaconda\python.exe -m agentcode web --port 8080 --open
-D:\Anaconda\python.exe -m agentcode web --llm openai    # 页面默认选中真实模型
-```
+三种打开方式，效果一样：
 
-页面**默认只给结果**：左侧选智能体、填任务、选模型，运行期间只显示进度计时，
-结束后给出荧光黄标注的最终答案。想看它是怎么想出来的，勾选左侧的「推理过程」，
-右侧就会逐步出现每一步的思考、调用的工具和工具返回的观察。两种模式下都可以导出完整轨迹 JSON。
+| 方式 | 做法 |
+| --- | --- |
+| 双击 | 打开项目目录，双击 `启动网页.cmd` |
+| 一条命令 | `D:\Anaconda\python.exe -m agentcode open` |
+| 自己管端口 | `D:\Anaconda\python.exe -m agentcode web --port 8080 --open` |
+
+`open` 会先探测端口：已经在运行就直接打开浏览器，没运行就以当前窗口启动服务并打开浏览器。
+服务地址默认 `http://127.0.0.1:8000/`。**这个窗口就是服务本身**，关掉窗口（或按 Ctrl+C）服务就停了；
+下次再双击 `启动网页.cmd` 即可。
+
+页面**只给结果**：左侧选智能体、填任务、选模型，点运行后先显示进度计时，结束后直接给出荧光黄标注的最终答案，
+没有推理过程、思考内容或工具调用记录的任何入口。想拿完整执行记录时，点「导出完整结果 JSON」可以得到每一步的原始数据。
 
 实现上分成两层：`agentcode/web/runner.py` 把一次运行变成事件流（`status` / `step` / `answer` / `error`），
 `agentcode/web/server.py` 用标准库 `http.server` 把它以 SSE 推给浏览器。整个过程**不新增任何依赖**，
 前端是一个不依赖框架和构建步骤的页面。服务只监听 `127.0.0.1`，不做鉴权，请勿暴露到公网。
 
-实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`；无论页面是否显示推理过程，
-事件流都会照常推送，所以将来要做更细的展示（比如只显示耗时或工具名）不需要改后端。
+实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`；页面当前只渲染 `answer` 事件，
+所以以后想改回显示某几步（比如只显示工具名）不需要动后端。
 
 ## 架构
 
 ```
-CLI (agentcode.cli)  ──  agentcode web  ──▶  Web 层 (agentcode.web)
-      │                                              │
-      ▼                                              ▼
+CLI (agentcode.cli)  ──  agentcode web / open  ──▶  Web 层 (agentcode.web)
+      │                                                    │
+      ▼                                                    ▼
 Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
       │
       ├──▶ BaseAgent (agentcode.core.agent) ──▶ Middleware 链（日志/重试/超时/用量）
@@ -65,7 +70,7 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
       └──▶ Memory (agentcode.memory.*)      ── 短期记忆与轨迹落盘
 
 配置：agentcode.config.Settings  ←  .env / JSON 配置文件
-结果：AgentResult / Step（可导出为轨迹 JSON）
+结果：AgentResult / Step（可导出为完整结果 JSON）
 ```
 
 目录一览：
@@ -79,9 +84,12 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
 | `agentcode/middleware/` | 日志、重试、超时、token 统计 |
 | `agentcode/agents/` | ReAct、Plan-and-Solve、Reflection、Echo 示例 |
 | `agentcode/web/` | 本地网页：事件流运行器与零依赖 HTTP 服务 |
+| `启动网页.cmd` | 双击启动服务并打开浏览器 |
 | `tests/` | 全离线单元测试 |
 
 ## 三种范式的示例输出
+
+命令行会打印完整轨迹（终端本来就是给开发者看的），网页只给结果——两边的差别只在这里。
 
 ```
 $ D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "北京天气如何"
@@ -101,8 +109,6 @@ $ D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "北�
 模型调用：2 次；token 合计约 215（估算值）；耗时 12 ms
 ================================================
 ```
-
-命令行会打印完整轨迹（终端本身就是给开发者看的），网页默认只给结果——两边的差别只在这里。
 
 ```powershell
 # 多步推理题：先列计划，再逐步算
@@ -181,8 +187,8 @@ def add(a: str, b: str) -> str:
 D:\Anaconda\python.exe -m pytest -q
 ```
 
-101 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
-其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证。
+103 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
+其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证，入口命令也做了端口探测的覆盖。
 
 ## 设计文档与实现计划
 

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AgentCode · 推理轨迹</title>
+    <title>AgentCode 智能体</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/style.css" />
   </head>
@@ -48,17 +48,6 @@
             </p>
           </fieldset>
 
-          <fieldset class="group">
-            <legend>显示</legend>
-            <label class="checkbox">
-              <input type="checkbox" id="show-steps" />
-              <span>推理过程</span>
-            </label>
-            <p class="hint">
-              默认只给结果，运行期间显示进度；勾选后会逐步显示每一步的思考与工具调用。
-            </p>
-          </fieldset>
-
           <button type="submit" id="run-button" class="primary">运行</button>
           <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
         </form>
@@ -71,10 +60,8 @@
       <main class="stream">
         <div class="empty" id="empty">
           <p>在左侧选一个智能体，写下任务，然后点运行。</p>
-          <p class="hint">结果会显示在这里。想复盘它的推理过程，勾选左侧的「推理过程」。</p>
+          <p class="hint">结果会显示在这里。</p>
         </div>
-
-        <ol class="steps" id="steps" hidden></ol>
 
         <section class="answer" id="answer" hidden>
           <p class="annotation">最终答案</p>
@@ -88,7 +75,7 @@
         </section>
 
         <div class="stream-actions">
-          <button type="button" id="export-button" class="ghost" disabled>导出轨迹 JSON</button>
+          <button type="button" id="export-button" class="ghost" disabled>导出完整结果 JSON</button>
           <button type="button" id="clear-button" class="ghost">清空</button>
         </div>
       </main>

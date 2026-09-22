@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,6 +29,13 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".json": "application/json; charset=utf-8",
 }
+
+
+def is_port_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout: float = 0.5) -> bool:
+    """探测本机端口是否已经有服务在监听。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
 
 
 def _tool_list(mock: bool) -> list[dict[str, Any]]:
@@ -168,9 +176,15 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         agent_name = str(payload.get("agent") or "react")
         requested_mode = payload.get("llm")
-        llm_mode = requested_mode if requested_mode in ("mock", "openai") else getattr(self.server, "llm_mode", "mock")
+        llm_mode = (
+            requested_mode
+            if requested_mode in ("mock", "openai")
+            else getattr(self.server, "llm_mode", "mock")
+        )
         raw_max_steps = payload.get("max_steps")
-        max_steps = int(raw_max_steps) if isinstance(raw_max_steps, int) and raw_max_steps > 0 else None
+        max_steps = (
+            int(raw_max_steps) if isinstance(raw_max_steps, int) and raw_max_steps > 0 else None
+        )
 
         settings = self._settings()
         self.send_response(200)
@@ -188,7 +202,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 max_steps=max_steps,
                 settings=settings,
             ):
-                chunk = f"event: {event['type']}\ndata: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
+                chunk = (
+                    f"event: {event['type']}\n"
+                    f"data: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
+                )
                 self.wfile.write(chunk.encode("utf-8"))
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -223,11 +240,17 @@ def serve(
     quiet: bool = True,
 ) -> None:
     """启动网页服务并阻塞，直到用户按 Ctrl+C。"""
-    server = create_server(host, port, llm_mode=llm_mode, env_file=env_file, quiet=quiet)
+    try:
+        server = create_server(host, port, llm_mode=llm_mode, env_file=env_file, quiet=quiet)
+    except OSError as exc:
+        print(f"启动失败：{host}:{port} 无法监听（{exc}）。")
+        print(f"端口可能已被占用，请换一个端口，例如 --port {port + 1}。")
+        return
+
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上可以切换）")
-    print("按 Ctrl+C 停止服务。")
+    print("这个窗口就是服务本身：关闭窗口或按 Ctrl+C 即可停止。")
     if open_browser:
         webbrowser.open(url)
     try:

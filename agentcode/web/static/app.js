@@ -1,4 +1,4 @@
-/* AgentCode 页面逻辑：查询智能体 → 提交任务 → 解析 SSE，默认只渲染最终结果 */
+/* AgentCode 页面逻辑：查询智能体 → 提交任务 → 解析 SSE → 只渲染最终结果 */
 
 const PREFERRED_AGENT = "react";
 const TIMER_INTERVAL_MS = 200;
@@ -7,12 +7,10 @@ const els = {
   form: document.getElementById("run-form"),
   agentList: document.getElementById("agent-list"),
   task: document.getElementById("task"),
-  showSteps: document.getElementById("show-steps"),
   runButton: document.getElementById("run-button"),
   runStatus: document.getElementById("run-status"),
   configList: document.getElementById("config-list"),
   empty: document.getElementById("empty"),
-  steps: document.getElementById("steps"),
   answer: document.getElementById("answer"),
   answerText: document.getElementById("answer-text"),
   answerMeta: document.getElementById("answer-meta"),
@@ -25,12 +23,9 @@ const els = {
 const state = {
   config: null,
   running: false,
-  showSteps: false,
   lastResult: null,
   timer: null,
 };
-
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(
@@ -118,11 +113,9 @@ async function submitRun(event) {
     task,
   };
 
-  state.showSteps = els.showSteps.checked;
-  clearStream();
+  clearResult();
   setRunning(true);
-  const startedAt = performance.now();
-  if (!state.showSteps) startProgressTimer(startedAt);
+  startProgressTimer(performance.now());
 
   try {
     const response = await fetch("/api/run", {
@@ -199,12 +192,8 @@ function handleEventBlock(block) {
 }
 
 function handleEvent(type, payload) {
-  if (type === "status") {
-    // 未勾选「推理过程」时只用计时器提示进度，不暴露具体动作
-    if (state.showSteps) els.runStatus.textContent = payload.message || "";
-  } else if (type === "step") {
-    if (state.showSteps) appendStep(payload);
-  } else if (type === "answer") {
+  // step 与 status 事件只会透露推理过程，页面上不做任何渲染
+  if (type === "answer") {
     showAnswer(payload);
   } else if (type === "error") {
     showFailure(payload.message || "运行失败。");
@@ -213,55 +202,20 @@ function handleEvent(type, payload) {
 
 /* ---------------------------------------------------------------- 渲染 */
 
-function field(label, value, kind) {
-  return `
-    <div class="field${kind ? ` field-${kind}` : ""}">
-      <span class="field-label">${escapeHtml(label)}</span>
-      <span class="field-value">${escapeHtml(value)}</span>
-    </div>`;
-}
-
-function appendStep(step) {
-  els.empty.hidden = true;
-  els.steps.hidden = false;
-
-  const rows = [];
-  if (step.thought) rows.push(field("思考", step.thought));
-  if (step.action) rows.push(field("行动", step.action, "action"));
-  if (step.observation) rows.push(field("观察", step.observation));
-  if (step.error) rows.push(field("异常", step.error, "error"));
-
-  const meta = step.tool
-    ? `<p class="step-meta">调用了工具 ${escapeHtml(step.tool)}，用时 ${Math.round(
-        step.duration_ms
-      )} 毫秒</p>`
-    : "";
-
-  const item = document.createElement("li");
-  item.className = "step";
-  item.innerHTML = `
-    <span class="step-index">${String(step.index).padStart(2, "0")}</span>
-    <div class="step-body">${rows.join("")}${meta}</div>`;
-  els.steps.appendChild(item);
-  item.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
-}
-
 function showAnswer(result) {
   state.lastResult = result;
   els.empty.hidden = true;
   els.answer.hidden = false;
   els.exportButton.disabled = false;
-  els.answerText.textContent = result.answer || "（没有给出答案）";
+  els.answerText.textContent = result.answer || "（这次没有得出结论）";
   const usage = result.usage || {};
   els.answerMeta.textContent = [
-    `${result.agent} 智能体`,
+    result.success ? "已完成" : "未得出结论",
     `模型调用 ${usage.calls || 0} 次`,
     `约 ${usage.total_tokens || 0} token${usage.estimated ? "（估算）" : ""}`,
     `耗时 ${formatSeconds(result.duration_ms)}`,
   ].join("，");
-  els.runStatus.textContent = result.success
-    ? `已完成，用时 ${formatSeconds(result.duration_ms)}`
-    : "已结束，但没有得出结论";
+  els.runStatus.textContent = `已完成，用时 ${formatSeconds(result.duration_ms)}`;
 }
 
 function showFailure(message) {
@@ -271,9 +225,7 @@ function showFailure(message) {
   els.runStatus.textContent = "失败";
 }
 
-function clearStream() {
-  els.steps.innerHTML = "";
-  els.steps.hidden = true;
+function clearResult() {
   els.answer.hidden = true;
   els.failure.hidden = true;
   els.empty.hidden = false;
@@ -290,7 +242,7 @@ function setRunning(running) {
 
 /* ---------------------------------------------------------------- 导出 */
 
-function exportTrace() {
+function exportResult() {
   if (!state.lastResult) return;
   const blob = new Blob([JSON.stringify(state.lastResult, null, 2)], {
     type: "application/json",
@@ -298,13 +250,13 @@ function exportTrace() {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${state.lastResult.agent}-trace.json`;
+  link.download = `${state.lastResult.agent}-result.json`;
   link.click();
   URL.revokeObjectURL(url);
 }
 
 els.form.addEventListener("submit", submitRun);
-els.exportButton.addEventListener("click", exportTrace);
-els.clearButton.addEventListener("click", clearStream);
+els.exportButton.addEventListener("click", exportResult);
+els.clearButton.addEventListener("click", clearResult);
 
 loadMeta();

@@ -10,8 +10,9 @@ import urllib.request
 
 import pytest
 
+from agentcode.cli import main
 from agentcode.web.runner import run_stream
-from agentcode.web.server import create_server
+from agentcode.web.server import create_server, is_port_open
 
 
 @pytest.fixture
@@ -25,6 +26,11 @@ def web_base() -> str:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _host_port(web_base: str) -> tuple[str, int]:
+    host, port = web_base.removeprefix("http://").split(":")
+    return host, int(port)
 
 
 def _get(url: str) -> tuple[int, str, bytes]:
@@ -98,14 +104,17 @@ def test_config_endpoint_masks_api_key(web_base, monkeypatch):
     assert "sk-1234567890abcdef" not in body.decode("utf-8")
 
 
-def test_index_page_is_served(web_base):
+def test_index_page_shows_result_only(web_base):
     status, content_type, body = _get(f"{web_base}/")
     html = body.decode("utf-8")
 
     assert status == 200
     assert "text/html" in content_type
     assert "AgentCode" in html
-    assert "轨迹" in html
+    assert "最终答案" in html
+    # 页面上不再有任何推理过程的入口
+    assert "推理过程" not in html
+    assert "思考" not in html
 
 
 def test_static_stylesheet_is_served(web_base):
@@ -116,8 +125,8 @@ def test_static_stylesheet_is_served(web_base):
 
 
 def test_static_path_traversal_is_blocked(web_base):
-    host, port = web_base.removeprefix("http://").split(":")
-    connection = http.client.HTTPConnection(host, int(port), timeout=10)
+    host, port = _host_port(web_base)
+    connection = http.client.HTTPConnection(host, port, timeout=10)
     try:
         connection.request("GET", "/static/../agentcode/config.py")
         response = connection.getresponse()
@@ -151,3 +160,21 @@ def test_unknown_route_returns_404(web_base):
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         _get(f"{web_base}/nope")
     assert excinfo.value.code == 404
+
+
+# ---------------------------------------------------------------- 网站入口
+
+
+def test_is_port_open_detects_running_server(web_base):
+    host, port = _host_port(web_base)
+    assert is_port_open(host, port) is True
+    assert is_port_open(host, 1) is False
+
+
+def test_open_command_reuses_running_server(web_base, capsys):
+    host, port = _host_port(web_base)
+    code = main(["open", "--host", host, "--port", str(port), "--no-browser"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "服务已经在运行" in output

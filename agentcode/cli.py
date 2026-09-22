@@ -1,10 +1,11 @@
-"""命令行入口：run / web / list / config 四个子命令。"""
+"""命令行入口：run / web / open / list / config 五个子命令。"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import webbrowser
 from typing import Any, Sequence
 
 from agentcode import agents  # noqa: F401  导入即触发内置智能体注册
@@ -27,7 +28,23 @@ from agentcode.tools.builtin import register_builtin_tools, register_demo_tools
 _SEPARATOR = "=" * 48
 _THIN_SEPARATOR = "-" * 48
 _OBSERVATION_PREVIEW = 200
-_DEFAULT_WEB_PORT = 8000
+
+
+def _add_web_arguments(parser: argparse.ArgumentParser) -> None:
+    """``web`` 与 ``open`` 两个子命令共用的参数。"""
+    parser.add_argument("--host", default=None, help="监听地址，默认 127.0.0.1")
+    parser.add_argument(
+        "--port", type=int, default=None, help="监听端口，默认 8000；填 0 表示随机"
+    )
+    parser.add_argument(
+        "--llm",
+        choices=["openai", "mock"],
+        default=None,
+        help="页面默认模型模式，默认 mock",
+    )
+    parser.add_argument("--verbose", action="store_true", help="打印访问日志")
+    parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,18 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
     web_parser = subparsers.add_parser("web", help="启动本地可视化网页")
-    web_parser.add_argument("--host", default=None, help="监听地址，默认 127.0.0.1")
-    web_parser.add_argument("--port", type=int, default=None, help="监听端口，默认 8000；填 0 表示随机")
-    web_parser.add_argument(
-        "--llm",
-        choices=["openai", "mock"],
-        default=None,
-        help="页面默认模型模式，默认 mock",
-    )
+    _add_web_arguments(web_parser)
     web_parser.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
-    web_parser.add_argument("--verbose", action="store_true", help="打印访问日志")
-    web_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
-    web_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+    open_parser = subparsers.add_parser("open", help="打开网页：没启动就顺手启动")
+    _add_web_arguments(open_parser)
+    open_parser.add_argument(
+        "--no-browser", action="store_true", help="只确保服务在运行，不打开浏览器"
+    )
 
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与内置工具")
     list_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
@@ -99,6 +112,16 @@ def _load_settings(args: argparse.Namespace) -> Settings:
     if max_steps:
         settings = settings.apply_overrides({"max_steps": max_steps})
     return settings
+
+
+def _web_target(args: argparse.Namespace, settings: Settings) -> tuple[str, int, str]:
+    """解析网页服务的地址、端口与默认模型模式。"""
+    from agentcode.web.server import DEFAULT_HOST, DEFAULT_PORT
+
+    host = args.host or settings.extra.get("web_host") or DEFAULT_HOST
+    port = args.port if args.port is not None else int(settings.extra.get("web_port", DEFAULT_PORT))
+    llm_mode = args.llm or settings.extra.get("llm_mode") or "mock"
+    return host, port, llm_mode
 
 
 def _build_tools(mock: bool) -> ToolRegistry:
@@ -200,18 +223,42 @@ def _run_command(args: argparse.Namespace) -> int:
 
 def _web_command(args: argparse.Namespace) -> int:
     """执行 web 子命令：启动本地可视化页面。"""
-    from agentcode.web.server import DEFAULT_HOST, DEFAULT_PORT, serve
+    from agentcode.web.server import serve
 
     settings = _load_settings(args)
-    host = args.host or settings.extra.get("web_host") or DEFAULT_HOST
-    port = args.port if args.port is not None else int(settings.extra.get("web_port", DEFAULT_PORT))
-    llm_mode = args.llm or settings.extra.get("llm_mode") or "mock"
+    host, port, llm_mode = _web_target(args, settings)
     serve(
         host=host,
         port=port,
         llm_mode=llm_mode,
         env_file=args.env_file,
-        open_browser=args.open,
+        open_browser=getattr(args, "open", False),
+        quiet=not args.verbose,
+    )
+    return 0
+
+
+def _open_command(args: argparse.Namespace) -> int:
+    """执行 open 子命令：服务没起就顺手起来，然后打开浏览器。"""
+    from agentcode.web.server import is_port_open, serve
+
+    settings = _load_settings(args)
+    host, port, llm_mode = _web_target(args, settings)
+    url = f"http://{host}:{port}/"
+
+    if is_port_open(host, port):
+        print(f"服务已经在运行：{url}")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return 0
+
+    print(f"页面入口：{url}")
+    serve(
+        host=host,
+        port=port,
+        llm_mode=llm_mode,
+        env_file=args.env_file,
+        open_browser=not args.no_browser,
         quiet=not args.verbose,
     )
     return 0
@@ -242,6 +289,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "web":
             return _web_command(args)
+
+        if args.command == "open":
+            return _open_command(args)
 
         return _run_command(args)
     except ConfigError as exc:
