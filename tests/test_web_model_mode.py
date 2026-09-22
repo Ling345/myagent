@@ -10,7 +10,7 @@ from agentcode.web.server import STATIC_DIR
 def test_index_page_has_no_offline_option():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert "离线演示" not in html
-    assert "最终答案" in html
+    assert "新会话" in html
 
 
 def test_index_page_has_no_model_switch():

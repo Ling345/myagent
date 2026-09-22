@@ -88,9 +88,10 @@ def test_agents_endpoint_lists_builtin_agents(web_base):
 
     assert status == 200
     assert "application/json" in content_type
-    assert {"react", "plan_and_solve", "reflection"} <= set(names)
+    assert {"react", "coding", "plan_and_solve", "reflection"} <= set(names)
     assert any(tool["name"] == "get_weather" for tool in payload["tools"]["mock"])
     assert any(tool["name"] == "web_search" for tool in payload["tools"]["real"])
+    assert any(tool["name"] == "run_python" for tool in payload["tools"]["real"])
 
 
 def test_config_endpoint_masks_api_key(web_base, monkeypatch):
@@ -111,7 +112,7 @@ def test_index_page_shows_result_only(web_base):
     assert status == 200
     assert "text/html" in content_type
     assert "AgentCode" in html
-    assert "最终答案" in html
+    assert "新会话" in html
     # 页面上不再有任何推理过程的入口
     assert "推理过程" not in html
     assert "思考" not in html
@@ -121,7 +122,7 @@ def test_static_stylesheet_is_served(web_base):
     status, content_type, body = _get(f"{web_base}/static/style.css")
     assert status == 200
     assert "text/css" in content_type
-    assert b"--paper" in body
+    assert b"--accent" in body
 
 
 def test_static_path_traversal_is_blocked(web_base):

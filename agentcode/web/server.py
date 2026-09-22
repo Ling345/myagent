@@ -15,7 +15,12 @@ from typing import Any
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.config import DEFAULT_MAX_SESSIONS, Settings
 from agentcode.core.registry import default_registry
-from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
+from agentcode.tools import (
+    ToolRegistry,
+    register_builtin_tools,
+    register_code_tools,
+    register_demo_tools,
+)
 from agentcode.web.sessions import AgentSessionStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -39,23 +44,32 @@ def is_port_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout: fl
         return sock.connect_ex((host, port)) == 0
 
 
-def _tool_list(mock: bool) -> list[dict[str, Any]]:
-    """列出某种模式下的可用工具。"""
+def _tool_list(mock: bool, settings: Settings | None = None) -> list[dict[str, Any]]:
+    """列出某种模式下的可用工具（只做清单，不创建工作目录）。"""
     registry = ToolRegistry()
     register_builtin_tools(registry, include_search=not mock)
     if mock:
         register_demo_tools(registry)
+    else:
+        active = settings or Settings.from_env()
+        register_code_tools(
+            registry,
+            root=active.code_root,
+            timeout=active.code_timeout,
+            output_limit=active.code_output_limit,
+            create=False,
+        )
     return [registry.get(name).to_dict() for name in registry.names()]  # type: ignore[union-attr]
 
 
-def agents_payload() -> dict[str, Any]:
+def agents_payload(settings: Settings | None = None) -> dict[str, Any]:
     """``GET /api/agents`` 的响应内容。"""
     return {
         "agents": [
             {"name": name, "description": default_registry.description_of(name)}
             for name in default_registry.names()
         ],
-        "tools": {"mock": _tool_list(True), "real": _tool_list(False)},
+        "tools": {"mock": _tool_list(True), "real": _tool_list(False, settings)},
     }
 
 
@@ -69,9 +83,11 @@ def config_payload(settings: Settings) -> dict[str, Any]:
         "api_key": masked["LLM_API_KEY"],
         "serpapi_configured": bool(settings.serpapi_key),
         "max_steps": settings.max_steps,
+        "coding_steps": settings.coding_steps,
         "timeout": settings.timeout,
         "memory_turns": settings.memory_turns,
         "max_sessions": settings.max_sessions,
+        "code_root": settings.code_root,
         "env_file": settings.env_file,
         "missing_keys": missing,
         "ready": not missing,
@@ -153,7 +169,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._serve_static(path[len("/static/") :])
             return
         if path == "/api/agents":
-            self._send_json(agents_payload())
+            self._send_json(agents_payload(self._settings()))
             return
         if path == "/api/config":
             self._send_json(config_payload(self._settings()))
@@ -273,7 +289,7 @@ def serve(
 
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
-    print(f"默认模型模式：{llm_mode}（页面上可以切换）")
+    print(f"默认模型模式：{llm_mode}（页面上不显示模式，一切走这个设置）")
     print("同一个页面标签页会自动延续上下文记忆，想重新开始就点页面上的「新会话」。")
     print("这个窗口就是服务本身：关闭窗口或按 Ctrl+C 即可停止。")
     if open_browser:

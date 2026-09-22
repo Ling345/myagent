@@ -8,64 +8,85 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <div class="layout">
-      <aside class="rail">
-        <header class="brand">
-          <h1>AgentCode</h1>
-          <p class="brand-note">选一个智能体，直接看结果</p>
+    <div class="flow" aria-hidden="true">
+      <span class="blob blob-a"></span>
+      <span class="blob blob-b"></span>
+      <span class="blob blob-c"></span>
+    </div>
+
+    <div class="app">
+      <aside class="sidebar">
+        <button type="button" id="new-session-button" class="new-chat">＋ 新会话</button>
+
+        <p class="sidebar-label">智能体</p>
+        <div id="agent-list" class="agent-list"></div>
+
+        <div class="sidebar-foot">
+          <dl id="config-list" class="config"></dl>
+          <p id="session-hint" class="hint"></p>
+          <button type="button" id="export-button" class="ghost" disabled>导出本轮结果 JSON</button>
+        </div>
+      </aside>
+
+      <main class="chat">
+        <header class="chat-head">
+          <span class="chat-title">AgentCode</span>
+          <span id="chat-sub" class="chat-sub"></span>
         </header>
 
-        <form id="run-form" class="controls" novalidate>
-          <fieldset class="group">
-            <legend>智能体</legend>
-            <div id="agent-list" class="agent-list"></div>
-          </fieldset>
+        <div id="messages" class="messages">
+          <div id="empty" class="welcome">
+            <h2>把任务交给智能体</h2>
+            <p>左侧选一个智能体，写下任务。它会记住这个会话里的上下文，追问时不必重复背景。</p>
+            <div class="samples">
+              <button
+                type="button"
+                class="sample"
+                data-agent="react"
+                data-task="查一下北京今天的天气，再推荐一个景点"
+              >
+                查天气并推荐景点
+              </button>
+              <button
+                type="button"
+                class="sample"
+                data-agent="coding"
+                data-task="实现 is_prime(n) 判断素数，并写 pytest 测试覆盖 2、3、4、9、13"
+              >
+                写代码并跑通测试
+              </button>
+              <button
+                type="button"
+                class="sample"
+                data-agent="plan_and_solve"
+                data-task="周一卖出 15 个苹果，周二翻倍，周三比周二少 5 个，三天共卖出多少"
+              >
+                分步解一道计算题
+              </button>
+              <button
+                type="button"
+                class="sample"
+                data-agent="reflection"
+                data-task="写一个找出 1 到 n 之间所有素数的函数，并说明算法复杂度"
+              >
+                写函数并自我评审
+              </button>
+            </div>
+          </div>
+        </div>
 
-          <div class="group">
-            <label class="group-label" for="task">任务</label>
+        <form id="run-form" class="composer" novalidate>
+          <div class="composer-box">
             <textarea
               id="task"
               name="task"
-              rows="4"
-              placeholder="例如：查一下北京今天的天气，再推荐一个景点"
+              rows="1"
+              placeholder="给智能体一个任务，回车发送，Shift+回车换行"
             ></textarea>
+            <button type="submit" id="send-button" class="send" aria-label="运行">↑</button>
           </div>
-
-          <button type="submit" id="run-button" class="primary">运行</button>
-          <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
-
-          <div class="rail-actions">
-            <button type="button" id="new-session-button" class="ghost">新会话</button>
-          </div>
-          <p class="hint" id="session-hint"></p>
+          <p id="run-status" class="composer-hint" role="status" aria-live="polite"></p>
         </form>
-
-        <footer class="rail-foot">
-          <dl id="config-list" class="config"></dl>
-        </footer>
-      </aside>
-
-      <main class="stream">
-        <div class="empty" id="empty">
-          <p>在左侧选一个智能体，写下任务，然后点运行。</p>
-          <p class="hint">结果会显示在这里；这个标签页里的追问会自动带上之前的上下文。</p>
-        </div>
-
-        <section class="answer" id="answer" hidden>
-          <p class="annotation">最终答案</p>
-          <p class="answer-text" id="answer-text"></p>
-          <p class="meta" id="answer-meta"></p>
-        </section>
-
-        <section class="failure" id="failure" hidden>
-          <p class="annotation">没能完成</p>
-          <p id="failure-text"></p>
-        </section>
-
-        <div class="stream-actions">
-          <button type="button" id="export-button" class="ghost" disabled>导出完整结果 JSON</button>
-          <button type="button" id="clear-button" class="ghost">清空</button>
-        </div>
       </main>
     </div>
 

@@ -1,26 +1,23 @@
-/* AgentCode 页面逻辑：查询智能体 → 提交任务 → 解析 SSE → 只渲染最终结果 */
+/* AgentCode 页面逻辑：选智能体 → 提交任务 → 解析 SSE → 以对话形式呈现结果 */
 
 const PREFERRED_AGENT = "react";
 const TIMER_INTERVAL_MS = 200;
 const SESSION_KEY = "agentcode-session";
+const MAX_TEXTAREA_HEIGHT = 200;
 
 const els = {
   form: document.getElementById("run-form"),
-  agentList: document.getElementById("agent-list"),
   task: document.getElementById("task"),
-  runButton: document.getElementById("run-button"),
+  sendButton: document.getElementById("send-button"),
   runStatus: document.getElementById("run-status"),
-  sessionHint: document.getElementById("session-hint"),
+  messages: document.getElementById("messages"),
+  empty: document.getElementById("empty"),
+  agentList: document.getElementById("agent-list"),
   newSessionButton: document.getElementById("new-session-button"),
   configList: document.getElementById("config-list"),
-  empty: document.getElementById("empty"),
-  answer: document.getElementById("answer"),
-  answerText: document.getElementById("answer-text"),
-  answerMeta: document.getElementById("answer-meta"),
-  failure: document.getElementById("failure"),
-  failureText: document.getElementById("failure-text"),
+  sessionHint: document.getElementById("session-hint"),
+  chatSub: document.getElementById("chat-sub"),
   exportButton: document.getElementById("export-button"),
-  clearButton: document.getElementById("clear-button"),
 };
 
 const state = {
@@ -28,6 +25,7 @@ const state = {
   running: false,
   lastResult: null,
   timer: null,
+  pending: null,
   memorySessionId: null,
 };
 
@@ -41,6 +39,11 @@ function escapeHtml(value) {
 
 function formatSeconds(ms) {
   return `${(Number(ms || 0) / 1000).toFixed(1)} 秒`;
+}
+
+function selectedAgent() {
+  const checked = document.querySelector('input[name="agent"]:checked');
+  return checked ? checked.value : PREFERRED_AGENT;
 }
 
 /* ------------------------------------------------------- 会话标识（上下文） */
@@ -73,19 +76,9 @@ function storeSessionId(id) {
   }
 }
 
-function updateSessionHint(kept, limit) {
-  if (kept > 0) {
-    const cap = limit > 0 ? `（上限 ${limit} 轮）` : "";
-    els.sessionHint.textContent = `当前会话已记住 ${kept} 轮上下文${cap}，追问时不必重复背景。`;
-    return;
-  }
-  els.sessionHint.textContent = "当前会话还没有上下文，提问一次之后就会记住。";
-}
-
 /* ------------------------------------------------------------ 加载元信息 */
 
 async function loadMeta() {
-  updateSessionHint(0, 0);
   try {
     const [agentsResponse, configResponse] = await Promise.all([
       fetch("/api/agents"),
@@ -95,6 +88,7 @@ async function loadMeta() {
     state.config = await configResponse.json();
     renderAgents(agentsPayload.agents);
     renderConfig(state.config);
+    updateHeader(0, 0);
   } catch (error) {
     els.runStatus.textContent = `无法连接本地服务：${error.message}`;
   }
@@ -113,6 +107,7 @@ function renderAgents(agents) {
       <input type="radio" name="agent" value="${escapeHtml(agent.name)}" ${checked} />
       <span class="agent-name">${escapeHtml(agent.name)}</span>
       <span class="agent-desc">${escapeHtml(agent.description)}</span>`;
+    option.querySelector("input").addEventListener("change", () => updateHeader(0, 0));
     els.agentList.appendChild(option);
   });
 }
@@ -138,6 +133,18 @@ function renderConfig(config) {
   }
 }
 
+function updateHeader(turnIndex, kept) {
+  const limit = state.config ? state.config.memory_turns : 0;
+  const parts = [`${selectedAgent()} 智能体`];
+  if (turnIndex > 0) parts.push(`本次会话第 ${turnIndex} 轮`);
+  if (kept > 0 && limit) parts.push(`已记住 ${kept}/${limit} 轮上下文`);
+  els.chatSub.textContent = parts.join(" · ");
+  els.sessionHint.textContent =
+    kept > 0
+      ? `当前会话已记住 ${kept} 轮上下文${limit ? `（上限 ${limit} 轮）` : ""}。`
+      : "当前会话还没有上下文，提问一次之后就会记住。";
+}
+
 /* -------------------------------------------------------------- 运行流程 */
 
 async function submitRun(event) {
@@ -152,12 +159,16 @@ async function submitRun(event) {
   }
 
   const payload = {
-    agent: new FormData(els.form).get("agent"),
+    agent: selectedAgent(),
     task,
     session_id: sessionId(),
   };
 
-  clearResult();
+  appendMessage("user", task);
+  els.empty.hidden = true;
+  els.task.value = "";
+  autoGrow();
+  const pending = appendPending();
   setRunning(true);
   startProgressTimer(performance.now());
 
@@ -170,16 +181,17 @@ async function submitRun(event) {
 
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
-      showFailure(detail.error || `服务返回了 ${response.status}。`);
+      failPending(pending, detail.error || `服务返回了 ${response.status}。`);
       return;
     }
 
-    await readEventStream(response);
+    await readEventStream(response, pending);
   } catch (error) {
-    showFailure(`无法连接本地服务：${error.message}`);
+    failPending(pending, `无法连接本地服务：${error.message}`);
   } finally {
     stopProgressTimer();
     setRunning(false);
+    els.task.focus();
   }
 }
 
@@ -196,8 +208,7 @@ async function startNewSession() {
     // 服务没起来也不影响本地换一个会话标识
   }
   storeSessionId(newSessionId());
-  clearResult();
-  updateSessionHint(0, 0);
+  clearTranscript();
   els.runStatus.textContent = "已开始新会话，上下文已清空。";
 }
 
@@ -216,7 +227,7 @@ function stopProgressTimer() {
   }
 }
 
-async function readEventStream(response) {
+async function readEventStream(response, pending) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -228,14 +239,14 @@ async function readEventStream(response) {
 
     let boundary = buffer.indexOf("\n\n");
     while (boundary !== -1) {
-      handleEventBlock(buffer.slice(0, boundary));
+      handleEventBlock(buffer.slice(0, boundary), pending);
       buffer = buffer.slice(boundary + 2);
       boundary = buffer.indexOf("\n\n");
     }
   }
 }
 
-function handleEventBlock(block) {
+function handleEventBlock(block, pending) {
   let type = "message";
   const dataLines = [];
   block.split("\n").forEach((line) => {
@@ -250,63 +261,135 @@ function handleEventBlock(block) {
   } catch (error) {
     return;
   }
-  handleEvent(type, payload);
-}
 
-function handleEvent(type, payload) {
   // step 与 status 事件只会透露推理过程，页面上不做任何渲染
   if (type === "answer") {
-    showAnswer(payload);
+    resolvePending(pending, payload);
   } else if (type === "error") {
-    showFailure(payload.message || "运行失败。");
+    failPending(pending, payload.message || "运行失败。");
   }
 }
 
 /* ---------------------------------------------------------------- 渲染 */
 
-function showAnswer(result) {
+function appendMessage(role, text, metaText) {
+  const wrapper = document.createElement("div");
+  wrapper.className = `msg msg-${role}`;
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.textContent = text;
+  wrapper.appendChild(body);
+  if (metaText) {
+    const meta = document.createElement("p");
+    meta.className = "msg-meta";
+    meta.textContent = metaText;
+    wrapper.appendChild(meta);
+  }
+  els.messages.appendChild(wrapper);
+  scrollToEnd();
+  return wrapper;
+}
+
+function appendPending() {
+  const wrapper = document.createElement("div");
+  wrapper.className = "msg msg-assistant";
+  wrapper.innerHTML = '<div class="msg-body"><span class="dots"><i></i><i></i><i></i></span></div>';
+  els.messages.appendChild(wrapper);
+  scrollToEnd();
+  return wrapper;
+}
+
+function resolvePending(pending, result) {
   state.lastResult = result;
-  els.empty.hidden = true;
-  els.answer.hidden = false;
   els.exportButton.disabled = false;
-  els.answerText.textContent = result.answer || "（这次没有得出结论）";
+  state.pending = null;
+
   const usage = result.usage || {};
   const turnIndex = Number(result.turn_index || 0);
   const kept = Number(result.memory_turns || 0);
-  const limit = Number(result.memory_limit || 0);
-  els.answerMeta.textContent = [
+  const answer = result.answer || "（这次没有得出结论）";
+  const meta = [
     result.success ? "已完成" : "未得出结论",
-    turnIndex > 0 ? `本次会话第 ${turnIndex} 轮` : "",
     `模型调用 ${usage.calls || 0} 次`,
     `约 ${usage.total_tokens || 0} token${usage.estimated ? "（估算）" : ""}`,
     `耗时 ${formatSeconds(result.duration_ms)}`,
-  ]
-    .filter(Boolean)
-    .join("，");
-  updateSessionHint(kept, limit);
+  ].join("，");
+
+  renderMessage(pending, {
+    role: "assistant",
+    text: answer,
+    meta,
+    className: result.success ? "" : "msg-error",
+  });
+  updateHeader(turnIndex, kept);
   els.runStatus.textContent = `已完成，用时 ${formatSeconds(result.duration_ms)}`;
 }
 
-function showFailure(message) {
-  els.empty.hidden = true;
-  els.failure.hidden = false;
-  els.failureText.textContent = `${message} 请检查左侧面板里的模型、接口与密钥。`;
+function failPending(pending, message) {
+  renderMessage(pending, {
+    role: "assistant",
+    text: `${message} 请检查左侧面板里的模型、接口与密钥。`,
+    className: "msg-error",
+  });
   els.runStatus.textContent = "失败";
 }
 
-function clearResult() {
-  els.answer.hidden = true;
-  els.failure.hidden = true;
+function renderMessage(node, options) {
+  node.className = `msg msg-${options.role} ${options.className || ""}`.trim();
+  node.innerHTML = "";
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  body.textContent = options.text;
+  node.appendChild(body);
+  if (options.meta) {
+    const meta = document.createElement("p");
+    meta.className = "msg-meta";
+    meta.textContent = options.meta;
+    node.appendChild(meta);
+  }
+  scrollToEnd();
+}
+
+function clearTranscript() {
+  els.messages.querySelectorAll(".msg").forEach((node) => node.remove());
   els.empty.hidden = false;
   els.exportButton.disabled = true;
   state.lastResult = null;
+  state.pending = null;
+  updateHeader(0, 0);
+  els.runStatus.textContent = "";
+}
+
+function scrollToEnd() {
+  els.messages.scrollTop = els.messages.scrollHeight;
 }
 
 function setRunning(running) {
   state.running = running;
-  els.runButton.disabled = running;
-  els.runButton.textContent = running ? "运行中…" : "运行";
+  els.sendButton.disabled = running;
   if (running) els.runStatus.textContent = "正在启动…";
+}
+
+/* ------------------------------------------------------------ 输入体验 */
+
+function autoGrow() {
+  els.task.style.height = "auto";
+  els.task.style.height = `${Math.min(els.task.scrollHeight, MAX_TEXTAREA_HEIGHT)}px`;
+}
+
+function fillSample(event) {
+  const button = event.currentTarget;
+  els.task.value = button.dataset.task || "";
+  const agent = button.dataset.agent;
+  if (agent) {
+    const radio = document.querySelector(`input[name="agent"][value="${agent}"]`);
+    if (radio) {
+      radio.checked = true;
+      updateHeader(0, 0);
+    }
+  }
+  autoGrow();
+  els.task.focus();
 }
 
 /* ---------------------------------------------------------------- 导出 */
@@ -327,6 +410,15 @@ function exportResult() {
 els.form.addEventListener("submit", submitRun);
 els.newSessionButton.addEventListener("click", startNewSession);
 els.exportButton.addEventListener("click", exportResult);
-els.clearButton.addEventListener("click", clearResult);
+document.querySelectorAll(".sample").forEach((button) => {
+  button.addEventListener("click", fillSample);
+});
+els.task.addEventListener("input", autoGrow);
+els.task.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!els.sendButton.disabled) els.form.requestSubmit();
+  }
+});
 
 loadMeta();
