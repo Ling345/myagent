@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
-from agentcode.config import Settings
+from agentcode.config import DEFAULT_MAX_SESSIONS, Settings
 from agentcode.core.registry import default_registry
 from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
 from agentcode.web.sessions import AgentSessionStore
@@ -70,6 +70,8 @@ def config_payload(settings: Settings) -> dict[str, Any]:
         "serpapi_configured": bool(settings.serpapi_key),
         "max_steps": settings.max_steps,
         "timeout": settings.timeout,
+        "memory_turns": settings.memory_turns,
+        "max_sessions": settings.max_sessions,
         "env_file": settings.env_file,
         "missing_keys": missing,
         "ready": not missing,
@@ -232,7 +234,7 @@ def create_server(
     llm_mode: str = "mock",
     env_file: str | None = None,
     quiet: bool = True,
-    max_sessions: int = 20,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
 ) -> ThreadingHTTPServer:
     """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。"""
     server = ThreadingHTTPServer((host, port), AgentCodeRequestHandler)
@@ -252,10 +254,18 @@ def serve(
     env_file: str | None = None,
     open_browser: bool = False,
     quiet: bool = True,
+    max_sessions: int = DEFAULT_MAX_SESSIONS,
 ) -> None:
     """启动网页服务并阻塞，直到用户按 Ctrl+C。"""
     try:
-        server = create_server(host, port, llm_mode=llm_mode, env_file=env_file, quiet=quiet)
+        server = create_server(
+            host,
+            port,
+            llm_mode=llm_mode,
+            env_file=env_file,
+            quiet=quiet,
+            max_sessions=max_sessions,
+        )
     except OSError as exc:
         print(f"启动失败：{host}:{port} 无法监听（{exc}）。")
         print(f"端口可能已被占用，请换一个端口，例如 --port {port + 1}。")

@@ -24,6 +24,11 @@ DEFAULT_TRACE_DIR = "traces"
 ENV_FILE_NAME = ".env"
 DEFAULT_SEARCH_LEVELS = 3
 
+#: 上下文记忆与网页会话的默认值（须与 core.agent / web.sessions 的默认值一致，
+#: 由 tests/test_memory_config.py 守住）
+DEFAULT_MEMORY_TURNS = 5
+DEFAULT_MAX_SESSIONS = 20
+
 
 def mask_secret(value: str | None) -> str:
     """对密钥做脱敏展示：保留首尾各 4 位。"""
@@ -85,6 +90,8 @@ class Settings:
     serpapi_key: str | None = None
     max_steps: int = DEFAULT_MAX_STEPS
     trace_dir: str = DEFAULT_TRACE_DIR
+    memory_turns: int = DEFAULT_MEMORY_TURNS
+    max_sessions: int = DEFAULT_MAX_SESSIONS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -127,7 +134,9 @@ class Settings:
             stream=_to_bool(pick("LLM_STREAM"), True),
             serpapi_key=pick("SERPAPI_API_KEY"),
             max_steps=_to_int(pick("AGENT_MAX_STEPS"), DEFAULT_MAX_STEPS),
-            trace_dir=str(pick("AGENT_TRACE_DIR", "traces")),
+            trace_dir=str(pick("AGENT_TRACE_DIR", DEFAULT_TRACE_DIR)),
+            memory_turns=_to_int(pick("AGENT_MEMORY_TURNS"), DEFAULT_MEMORY_TURNS),
+            max_sessions=_to_int(pick("AGENT_MAX_SESSIONS"), DEFAULT_MAX_SESSIONS),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -169,6 +178,10 @@ class Settings:
             raise ConfigError("LLM_TIMEOUT 必须大于 0。")
         if self.max_steps <= 0:
             raise ConfigError("AGENT_MAX_STEPS 必须大于 0。")
+        if self.memory_turns <= 0:
+            raise ConfigError("AGENT_MEMORY_TURNS 必须大于 0。")
+        if self.max_sessions <= 0:
+            raise ConfigError("AGENT_MAX_SESSIONS 必须大于 0。")
         return self
 
     # ------------------------------------------------------------------ 展示
@@ -183,6 +196,8 @@ class Settings:
             "LLM_TIMEOUT": str(self.timeout),
             "LLM_TEMPERATURE": str(self.temperature),
             "AGENT_MAX_STEPS": str(self.max_steps),
+            "AGENT_MEMORY_TURNS": str(self.memory_turns),
+            "AGENT_MAX_SESSIONS": str(self.max_sessions),
             "AGENT_TRACE_DIR": self.trace_dir,
             ".env 来源": self.env_file or "（未找到，使用进程环境变量）",
         }

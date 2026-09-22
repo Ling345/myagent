@@ -22,6 +22,7 @@ from agentcode.core.errors import AgentCodeError
 from agentcode.core.registry import default_registry
 from agentcode.llm.mock import demo_responses_llm
 from agentcode.llm.openai_compatible import OpenAICompatibleLLM
+from agentcode.memory import ShortTermMemory
 from agentcode.middleware import RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
@@ -78,7 +79,7 @@ def create_backend(
     settings: Settings,
     max_steps: int | None = None,
 ) -> BaseAgent:
-    """装配一个智能体实例（模型与工具；中间件随后注入）。"""
+    """装配一个智能体实例（模型、工具与上下文记忆；中间件随后注入）。"""
     if llm_mode == "mock":
         llm = demo_responses_llm(agent_name)
         tools = build_tools(mock=True)
@@ -91,6 +92,7 @@ def create_backend(
         agent_name,
         llm=llm,
         tools=tools,
+        memory=ShortTermMemory(max_turns=settings.memory_turns),
         max_steps=max_steps or settings.max_steps,
     )
 
@@ -137,6 +139,8 @@ def run_stream(
             result = agent.run(task, context=ctx)
             payload = result.to_dict()
             payload["memory_turns"] = len(agent.memory)
+            payload["memory_limit"] = agent.memory.max_turns
+            payload["turn_index"] = agent.memory.total_turns
             emit({"type": "answer", "data": payload})
         except AgentCodeError as exc:
             emit({"type": "error", "data": {"message": str(exc)}})

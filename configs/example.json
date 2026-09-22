@@ -2,5 +2,7 @@
   "agent": "react",
   "max_steps": 6,
   "temperature": 0.0,
-  "trace_dir": "traces"
+  "trace_dir": "traces",
+  "memory_turns": 5,
+  "max_sessions": 20
 }

@@ -73,17 +73,19 @@ function storeSessionId(id) {
   }
 }
 
-function updateSessionHint(turns) {
-  els.sessionHint.textContent =
-    turns > 0
-      ? `当前会话已记住 ${turns} 轮上下文，追问时不必重复背景。`
-      : "当前会话还没有上下文，提问一次之后就会记住。";
+function updateSessionHint(kept, limit) {
+  if (kept > 0) {
+    const cap = limit > 0 ? `（上限 ${limit} 轮）` : "";
+    els.sessionHint.textContent = `当前会话已记住 ${kept} 轮上下文${cap}，追问时不必重复背景。`;
+    return;
+  }
+  els.sessionHint.textContent = "当前会话还没有上下文，提问一次之后就会记住。";
 }
 
 /* ------------------------------------------------------------ 加载元信息 */
 
 async function loadMeta() {
-  updateSessionHint(0);
+  updateSessionHint(0, 0);
   try {
     const [agentsResponse, configResponse] = await Promise.all([
       fetch("/api/agents"),
@@ -122,6 +124,7 @@ function renderConfig(config) {
     ["密钥", config.api_key || "未配置"],
     ["搜索工具", config.serpapi_configured ? "已配置" : "未配置"],
     ["步数上限", String(config.max_steps)],
+    ["记忆轮数", String(config.memory_turns ?? "—")],
   ];
   els.configList.innerHTML = rows
     .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`)
@@ -196,7 +199,7 @@ async function startNewSession() {
   }
   storeSessionId(newSessionId());
   clearResult();
-  updateSessionHint(0);
+  updateSessionHint(0, 0);
   els.runStatus.textContent = "已开始新会话，上下文已清空。";
 }
 
@@ -270,17 +273,19 @@ function showAnswer(result) {
   els.exportButton.disabled = false;
   els.answerText.textContent = result.answer || "（这次没有得出结论）";
   const usage = result.usage || {};
-  const turns = Number(result.memory_turns || 0);
+  const turnIndex = Number(result.turn_index || 0);
+  const kept = Number(result.memory_turns || 0);
+  const limit = Number(result.memory_limit || 0);
   els.answerMeta.textContent = [
     result.success ? "已完成" : "未得出结论",
-    turns > 0 ? `本次会话第 ${turns} 轮` : "",
+    turnIndex > 0 ? `本次会话第 ${turnIndex} 轮` : "",
     `模型调用 ${usage.calls || 0} 次`,
     `约 ${usage.total_tokens || 0} token${usage.estimated ? "（估算）" : ""}`,
     `耗时 ${formatSeconds(result.duration_ms)}`,
   ]
     .filter(Boolean)
     .join("，");
-  updateSessionHint(turns);
+  updateSessionHint(kept, limit);
   els.runStatus.textContent = `已完成，用时 ${formatSeconds(result.duration_ms)}`;
 }
 

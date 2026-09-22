@@ -15,7 +15,7 @@ from agentcode.core.registry import default_registry
 from agentcode.core.result import AgentResult
 from agentcode.llm.mock import demo_responses_llm
 from agentcode.llm.openai_compatible import OpenAICompatibleLLM
-from agentcode.memory import FileSessionStore, JsonStore
+from agentcode.memory import FileSessionStore, JsonStore, ShortTermMemory
 from agentcode.memory.session_store import DEFAULT_SESSION_DIR
 from agentcode.middleware import (
     LoggingMiddleware,
@@ -66,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="模型后端；mock 为离线演示，不消耗额度",
     )
     run_parser.add_argument("--max-steps", type=int, default=None, help="最大步数")
+    run_parser.add_argument(
+        "--memory-turns", type=int, default=None, help="上下文记忆保留几轮，默认取配置"
+    )
     run_parser.add_argument("--trace", default=None, help="把运行轨迹写入指定 JSON 文件")
     run_parser.add_argument("--json", action="store_true", help="以 JSON 形式输出结果")
     run_parser.add_argument("--quiet", action="store_true", help="不打印过程日志")
@@ -117,10 +120,14 @@ def _load_settings(args: argparse.Namespace) -> Settings:
     config_path = getattr(args, "config", None)
     if config_path:
         settings = settings.apply_overrides(JsonStore.load(config_path))
+    overrides = {}
     max_steps = getattr(args, "max_steps", None)
     if max_steps:
-        settings = settings.apply_overrides({"max_steps": max_steps})
-    return settings
+        overrides["max_steps"] = max_steps
+    memory_turns = getattr(args, "memory_turns", None)
+    if memory_turns:
+        overrides["memory_turns"] = memory_turns
+    return settings.apply_overrides(overrides) if overrides else settings
 
 
 def _web_target(args: argparse.Namespace, settings: Settings) -> tuple[str, int, str]:
@@ -213,8 +220,16 @@ def _run_command(args: argparse.Namespace) -> int:
         return 2
 
     session_name = getattr(args, "session", None)
-    session_store = FileSessionStore(_session_dir(args, settings)) if session_name else None
-    memory = session_store.load(session_name) if session_store else None
+    session_store = (
+        FileSessionStore(_session_dir(args, settings), max_turns=settings.memory_turns)
+        if session_name
+        else None
+    )
+    memory = (
+        session_store.load(session_name)
+        if session_store
+        else ShortTermMemory(max_turns=settings.memory_turns)
+    )
 
     if args.llm == "mock":
         llm = demo_responses_llm(agent_name)
@@ -239,7 +254,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
     if session_store:
         saved = session_store.save(session_name, agent.memory)
-        print(f"会话已保存：{saved}（共 {len(agent.memory)} 轮）")
+        print(f"会话已保存：{saved}（共 {len(agent.memory)}/{settings.memory_turns} 轮）")
     if args.trace:
         saved_trace = JsonStore.save(result.to_dict(), args.trace)
         print(f"轨迹已写入：{saved_trace}")
@@ -263,6 +278,7 @@ def _web_command(args: argparse.Namespace) -> int:
         env_file=args.env_file,
         open_browser=getattr(args, "open", False),
         quiet=not args.verbose,
+        max_sessions=settings.max_sessions,
     )
     return 0
 
@@ -289,6 +305,7 @@ def _open_command(args: argparse.Namespace) -> int:
         env_file=args.env_file,
         open_browser=not args.no_browser,
         quiet=not args.verbose,
+        max_sessions=settings.max_sessions,
     )
     return 0
 
