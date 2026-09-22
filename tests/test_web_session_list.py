@@ -27,14 +27,16 @@ def _agent() -> ReActAgent:
 def test_create_and_list_sessions(tmp_path):
     store = SessionStore(tmp_path)
     first = store.create(name="北京游")
+    store.append_message(first.id, "user", "北京怎么玩")
     second = store.create()
+    store.append_message(second.id, "user", "上海怎么玩")
 
     listed = store.list()
     names = [item["name"] for item in listed]
 
     assert first.id != second.id
     assert "北京游" in names
-    assert DEFAULT_SESSION_NAME in names
+    assert "上海怎么玩" in names  # 空名会话按首条提问自动命名
     assert set(listed[0]) >= {"id", "name", "created_at", "updated_at", "message_count"}
 
 
@@ -121,12 +123,38 @@ def test_prunes_oldest_session_beyond_limit(tmp_path):
     first = store.create(name="一")
     store.append_message(first.id, "user", "旧")
     second = store.create(name="二")
+    store.append_message(second.id, "user", "中")
     third = store.create(name="三")
+    store.append_message(third.id, "user", "新")
 
     ids = [item["id"] for item in store.list()]
     assert first.id not in ids
     assert set(ids) == {second.id, third.id}
     assert not (tmp_path / f"{first.id}.json").exists()
+
+
+def test_create_drops_other_empty_sessions(tmp_path):
+    """空会话不该堆积：否则列表会被一堆「新会话」淹没，还占满上限名额。"""
+    store = SessionStore(tmp_path)
+    old = store.create(name="聊过的")
+    store.append_message(old.id, "user", "北京天气如何")
+    store.append_message(old.id, "assistant", "北京晴天")
+    blank_one = store.create()
+    blank_two = store.create()
+
+    ids = [item["id"] for item in store.list()]
+    assert old.id in ids  # 有内容的会话必须保留
+    assert blank_one.id not in ids  # 之前的空会话被清掉
+    assert blank_two.id in ids  # 只剩当前这个空会话
+    assert len(ids) == 2
+
+
+def test_empty_session_survives_until_a_new_one_is_created(tmp_path):
+    store = SessionStore(tmp_path)
+    blank = store.create()
+    assert [item["id"] for item in store.list()] == [blank.id]
+    store.get(blank.id, _agent)  # 只是取过一次智能体，不算有内容
+    assert [item["id"] for item in store.list()] == [blank.id]
 
 
 def test_reset_clears_messages_and_agent(tmp_path):
@@ -245,6 +273,16 @@ def test_unknown_session_returns_empty_transcript(web_base):
     detail = _get(f"{web_base}/api/session?id=missing-session")
     assert detail["session"] is None
     assert detail["messages"] == []
+
+
+def test_repeated_new_sessions_do_not_pile_up_empty_ones(web_base):
+    first = _post(f"{web_base}/api/sessions/create", {})["session"]["id"]
+    second = _post(f"{web_base}/api/sessions/create", {})["session"]["id"]
+    third = _post(f"{web_base}/api/sessions/create", {})["session"]["id"]
+
+    ids = [item["id"] for item in _get(f"{web_base}/api/sessions")["sessions"]]
+    assert ids == [third]
+    assert first not in ids and second not in ids
 
 
 def test_echo_agent_is_available_in_web(tmp_path):

@@ -203,14 +203,27 @@ class SessionStore:
                 return record
             return self.create(name=name)
 
-    def create(self, name: Any = None) -> SessionRecord:
-        """新建一个会话。"""
+    def create(self, name: Any = None, prune_empty: bool = True) -> SessionRecord:
+        """新建一个会话。
+
+        ``prune_empty`` 为真时会先清掉其它**空会话**——空会话没有任何内容值得保留，
+        堆在列表里既干扰阅读，还可能把上限名额占满，把真正聊过的会话挤掉。
+        """
         with self._lock:
+            if prune_empty:
+                self._drop_empty_sessions()
             record = SessionRecord(id=uuid.uuid4().hex[:12], name=clean_name(name))
             self._sessions[record.id] = record
             self._persist(record)
             self._prune()
             return record
+
+    def _drop_empty_sessions(self) -> None:
+        """清掉当前还没有任何消息的会话。"""
+        empties = [item.id for item in self._sessions.values() if not item.messages]
+        for session_id in empties:
+            self._sessions.pop(session_id, None)
+            self._remove_file(session_id)
 
     def rename(self, session_id: str, name: Any) -> bool:
         """给会话改名；会话不存在返回 False。"""

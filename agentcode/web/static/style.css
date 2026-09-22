@@ -127,7 +127,7 @@ body {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   padding: 18px 14px 16px;
   background: var(--surface);
   backdrop-filter: blur(20px) saturate(1.15);
@@ -170,8 +170,18 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  max-height: 32vh;
+  flex: 1 1 auto;
+  min-height: 5.5rem;
+  max-height: 42vh;
   overflow-y: auto;
+}
+
+/* 侧栏里其它块不允许被压缩，避免会话列表被挤成一条缝 */
+.new-chat,
+.sidebar-label,
+.agent-list,
+.sidebar-foot {
+  flex: none;
 }
 
 .session-row {
@@ -246,10 +256,23 @@ body {
 
 .agent-option {
   display: block;
-  padding: 9px 12px;
+  padding: 7px 12px;
   border: 0;
   border-radius: 10px;
   cursor: pointer;
+}
+
+/* 只给选中的智能体展开说明，其它只占一行，把空间留给会话列表 */
+.agent-desc {
+  display: none;
+}
+
+.agent-option:has(input:checked) {
+  padding-bottom: 9px;
+}
+
+.agent-option:has(input:checked) .agent-desc {
+  display: block;
 }
 
 .agent-option:hover {
