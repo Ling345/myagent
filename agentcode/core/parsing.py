@@ -18,17 +18,26 @@ _CALL_PATTERN = re.compile(rf"^{_NAME}\s*\((.*)\)\s*$", re.DOTALL)
 _BARE_NAME_PATTERN = re.compile(rf"^{_NAME}$")
 _FENCE_PATTERN = re.compile(r"```(?:python|py|json)?\s*(.*?)```", re.DOTALL)
 _LIST_PREFIX_PATTERN = re.compile(r"^\s*(?:[-*•]|\d+\s*[.、)]|\(\d+\))\s*")
-#: 模型有时会在 Action 后面顺手编一段 Observation，解析时要切掉
-_OBSERVATION_SUFFIX_PATTERN = re.compile(r"\n\s*(?:Observation|观察)[:：].*$", re.DOTALL)
+#: 模型有时会在 Action 后面顺手多输出一段（自己编的 Observation、重复的 Thought/Action 块），
+#: 这些都要切掉，否则会被当成工具参数，模型拿到垃圾结果后就开始空转
+_SECTION_SUFFIX_PATTERN = re.compile(
+    r"\n\s*(?:Observation|观察|Thought|思考|Action|行动)\s*[:：].*$", re.DOTALL
+)
+#: 模型有时会把提示词里的条目文字当成前缀写进动作，例如"Action: 调用工具：write_file[...]"
+_ACTION_LABEL_PATTERN = re.compile(
+    r"^(?:调用工具|给出最终答案|最终答案|工具|Action|Final\s*Answer|Answer)\s*[:：]\s*",
+    re.IGNORECASE,
+)
 
 #: 按行兜底解析时，至少需要这么多行才认为它是一份计划
 _MIN_FALLBACK_STEPS = 2
 
 
 def _clean_action(action: str) -> str:
-    """清掉模型顺手输出的 Observation 后缀与代码围栏残留。"""
+    """清掉模型顺手多输出的段落后缀与代码围栏残留。"""
     text = action.strip()
-    text = _OBSERVATION_SUFFIX_PATTERN.sub("", text)
+    text = _SECTION_SUFFIX_PATTERN.sub("", text)
+    text = _ACTION_LABEL_PATTERN.sub("", text)
     if text.endswith("```"):
         text = text[:-3].strip()
     return text.strip()

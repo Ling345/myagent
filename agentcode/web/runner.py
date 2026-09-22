@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
@@ -37,6 +38,35 @@ Event = dict[str, Any]
 Emitter = Callable[[Event], None]
 
 
+def snapshot_files(root: str | Path) -> dict[str, tuple[float, int]]:
+    """记录目录下每个文件的（修改时间, 大小），用于比出本轮新增/改动。"""
+    base = Path(root)
+    if not base.is_dir():
+        return {}
+    snapshot: dict[str, tuple[float, int]] = {}
+    for item in base.rglob("*"):
+        if item.is_file():
+            try:
+                stat = item.stat()
+            except OSError:
+                continue
+            snapshot[item.relative_to(base).as_posix()] = (stat.st_mtime, stat.st_size)
+    return snapshot
+
+
+def changed_files(
+    before: dict[str, tuple[float, int]],
+    after: dict[str, tuple[float, int]],
+) -> list[dict[str, Any]]:
+    """比出新增或内容变化的文件，按路径排序。"""
+    changed = [
+        {"path": path, "bytes": size}
+        for path, (mtime, size) in sorted(after.items())
+        if before.get(path) != (mtime, size)
+    ]
+    return changed
+
+
 class EventMiddleware(Middleware):
     """把"正在调用模型 / 工具"推成状态事件，让页面有实时反馈。"""
 
@@ -60,12 +90,23 @@ class EventMiddleware(Middleware):
         return wrapped
 
 
-def build_tools(mock: bool, settings: Settings | None = None) -> ToolRegistry:
-    """按后端类型准备工具集（真实模式下额外提供受限代码工具）。"""
+def build_tools(
+    mock: bool,
+    settings: Settings | None = None,
+    agent_name: str | None = None,
+) -> ToolRegistry:
+    """按后端类型与智能体准备工具集。
+
+    代码工具只给 coding 智能体：别的智能体用不上，挂在工具清单里既占提示词、
+    又会诱导模型去做多余的代码执行（多一轮就多几秒）。
+    """
     registry = ToolRegistry()
     register_builtin_tools(registry, include_search=not mock)
     if mock:
         register_demo_tools(registry)
+        return registry
+
+    if agent_name is not None and agent_name != "coding":
         return registry
 
     active = settings or Settings.from_env()
@@ -100,7 +141,7 @@ def create_backend(
     else:
         settings.validate()
         llm = OpenAICompatibleLLM.from_settings(settings)
-        tools = build_tools(mock=False, settings=settings)
+        tools = build_tools(mock=False, settings=settings, agent_name=agent_name)
 
     return default_registry.create(
         agent_name,
@@ -152,12 +193,18 @@ def run_stream(
             # 中间件绑定本次请求的事件出口，所以每次请求都换一套
             agent.middlewares = build_middlewares(emit, active_settings)
 
+            # 只有 coding 会写文件；跑之前先拍个快照，跑完比出本轮产物
+            code_root = Path(active_settings.code_root).resolve()
+            before = snapshot_files(code_root) if agent_name == "coding" else None
+
             result = agent.run(task, context=ctx)
+            artifacts = changed_files(before, snapshot_files(code_root)) if before is not None else []
             payload = result.to_dict()
             payload["memory_turns"] = len(agent.memory)
             payload["memory_limit"] = agent.memory.max_turns
             payload["turn_index"] = agent.memory.total_turns
             payload["session_id"] = session_id
+            payload["artifacts"] = artifacts
 
             if session_store is not None and session_id:
                 session_store.append_message(
@@ -165,6 +212,7 @@ def run_stream(
                     "assistant",
                     result.answer or (result.error or "（未得出结论）"),
                     success=result.success,
+                    artifacts=artifacts,
                 )
             emit({"type": "answer", "data": payload})
         except AgentCodeError as exc:

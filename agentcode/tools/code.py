@@ -52,13 +52,20 @@ def _truncate(text: str, limit: int) -> str:
     return f"{text[:limit]}\n…（已截断，原始长度 {len(text)} 字符）"
 
 
-def _resolve_in_root(root: Path, raw_path: str) -> Path:
-    """把相对路径解析到根目录内；越界时抛 ``ValueError``。"""
+def resolve_in_root(root: Path, raw_path: str) -> Path:
+    """把相对路径解析到根目录内；越界时抛 ``ValueError``。
+
+    工具与网页的文件浏览接口共用这一份实现，避免两处规则不一致。
+    """
     candidate = Path(str(raw_path or "").strip() or ".")
     target = (root / candidate).resolve()
     if target != root and root not in target.parents:
         raise ValueError(f"路径超出代码根目录：{raw_path}")
     return target
+
+
+#: 兼容内部旧名字
+_resolve_in_root = resolve_in_root
 
 
 def register_code_tools(
@@ -173,14 +180,13 @@ def register_code_tools(
 
     registry.register_tool(
         "run_python",
-        "在代码工作目录执行一段 Python 代码，返回退出码与 stdout/stderr。写完代码必须用它跑一遍。"
-        + location,
+        "在代码工作目录执行一段 Python 代码，返回退出码与 stdout/stderr。改完代码必须用它跑一遍。",
         run_python,
         {"code": "要执行的 Python 代码", "timeout_seconds": "可选，超时秒数（上限 60）"},
     )
     registry.register_tool(
         "read_file",
-        f"读取代码工作目录里的文件，内容过长会截断。{location}",
+        "读取代码工作目录里的文件，内容过长会截断（目录见 write_file 的说明）。",
         read_file,
         {"path": "相对代码工作目录的文件路径"},
     )
@@ -192,7 +198,7 @@ def register_code_tools(
     )
     registry.register_tool(
         "list_files",
-        f"列出代码工作目录里的文件，用于确认当前有哪些文件。{location}",
+        "列出代码工作目录里的文件，用于确认当前有哪些文件（目录见 write_file 的说明）。",
         list_files,
         {"path": "可选，相对路径的目录，默认根目录"},
     )

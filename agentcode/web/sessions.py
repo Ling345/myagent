@@ -40,8 +40,8 @@ def default_session_dir() -> str:
 
 
 def _now() -> str:
-    """当前时间的 ISO 字符串（UTC，精确到秒）。"""
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    """当前时间的 ISO 字符串（UTC，精确到微秒）。"""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def clean_name(name: Any, fallback: str = DEFAULT_SESSION_NAME) -> str:
@@ -58,6 +58,8 @@ class SessionRecord:
     name: str = DEFAULT_SESSION_NAME
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    #: 同毫秒创建时的稳定排序依据，保证"最近使用在前"不会因时间戳打平而抖动
+    seq: int = 0
     messages: list[dict[str, Any]] = field(default_factory=list)
     agent: BaseAgent | None = field(default=None, repr=False, compare=False)
 
@@ -79,6 +81,7 @@ class SessionRecord:
             "name": self.name,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "seq": self.seq,
             "messages": [dict(message) for message in self.messages],
         }
 
@@ -93,6 +96,7 @@ class SessionRecord:
             name=clean_name(payload.get("name")),
             created_at=str(payload.get("created_at") or _now()),
             updated_at=str(payload.get("updated_at") or _now()),
+            seq=int(payload.get("seq") or 0),
             messages=messages,
         )
 
@@ -117,8 +121,15 @@ class SessionStore:
         self.max_sessions = max_sessions
         self.max_turns = max_turns
         self._sessions: dict[str, SessionRecord] = {}
+        self._sequence = 0
         self._lock = threading.RLock()
         self._load_from_disk()
+        self._sequence = max([self._sequence] + [item.seq for item in self._sessions.values()])
+
+    def _next_seq(self) -> int:
+        """取下一个递增序号（调用方需持有锁）。"""
+        self._sequence += 1
+        return self._sequence
 
     # ------------------------------------------------------------------ 磁盘
 
@@ -181,7 +192,11 @@ class SessionStore:
     def list(self) -> list[dict[str, Any]]:
         """按最近使用倒序列出会话。"""
         with self._lock:
-            records = sorted(self._sessions.values(), key=lambda item: item.updated_at, reverse=True)
+            records = sorted(
+                self._sessions.values(),
+                key=lambda item: (item.updated_at, item.seq),
+                reverse=True,
+            )
             return [record.summary() for record in records]
 
     def record(self, session_id: str) -> SessionRecord | None:
@@ -197,6 +212,7 @@ class SessionStore:
                 if record is not None:
                     return record
                 record = SessionRecord(id=self._safe_id(session_id), name=clean_name(name))
+                record.seq = self._next_seq()
                 self._sessions[record.id] = record
                 self._persist(record)
                 self._prune()
@@ -213,6 +229,7 @@ class SessionStore:
             if prune_empty:
                 self._drop_empty_sessions()
             record = SessionRecord(id=uuid.uuid4().hex[:12], name=clean_name(name))
+            record.seq = self._next_seq()
             self._sessions[record.id] = record
             self._persist(record)
             self._prune()
@@ -233,6 +250,7 @@ class SessionStore:
                 return False
             record.name = clean_name(name)
             record.updated_at = _now()
+            record.seq = self._next_seq()
             self._persist(record)
             return True
 
@@ -254,6 +272,7 @@ class SessionStore:
             record.messages.clear()
             record.agent = None
             record.updated_at = _now()
+            record.seq = self._next_seq()
             self._persist(record)
             return True
 
@@ -265,6 +284,7 @@ class SessionStore:
         role: str,
         content: str,
         success: bool = True,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> None:
         """往会话里追加一条消息；第一条用户消息会自动作为会话名。"""
         text = str(content or "").strip()
@@ -278,12 +298,14 @@ class SessionStore:
                     "content": text,
                     "at": _now(),
                     "success": bool(success),
+                    **({"artifacts": artifacts} if artifacts else {}),
                 }
             )
             if role == "user" and record.name == DEFAULT_SESSION_NAME:
                 first_line = text.splitlines()[0]
                 record.name = clean_name(first_line[:AUTO_NAME_LENGTH])
             record.updated_at = _now()
+            record.seq = self._next_seq()
             self._persist(record)
 
     def messages(self, session_id: str) -> list[dict[str, Any]]:

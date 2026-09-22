@@ -470,6 +470,126 @@ button:disabled {
   font-size: 12px;
 }
 
+/* --------------------------------------------------------- 产物文件与查看器 */
+
+.artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.artifact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.artifact:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.artifact-size {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.artifact:hover .artifact-size {
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(19, 24, 32, 0.35);
+  backdrop-filter: blur(3px);
+  animation: fade-in 140ms ease-out both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.viewer-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  max-height: 84vh;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.viewer-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.viewer-close {
+  flex: none;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.viewer-close:hover {
+  color: var(--accent);
+}
+
+.viewer-body {
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.viewer-meta {
+  margin: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .dots {
   display: inline-flex;
   gap: 4px;
@@ -649,7 +769,8 @@ button:disabled {
 @media (prefers-reduced-motion: reduce) {
   .blob,
   .dots i,
-  .msg {
+  .msg,
+  .viewer {
     animation: none;
   }
 

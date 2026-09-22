@@ -2,10 +2,29 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Mapping, Sequence
 
 from agentcode.core.errors import ConfigError, LLMError
 from agentcode.llm.base import BaseLLM, Message
+
+#: 按 (base_url, api_key, timeout) 复用同一个 SDK 客户端，
+#: 避免每次请求都重新建连接池、重做 TLS 握手
+_CLIENT_CACHE: dict[tuple[str, str, float], Any] = {}
+_CLIENT_LOCK = threading.Lock()
+
+
+def _shared_client(api_key: str, base_url: str, timeout: float) -> Any:
+    """取（或创建）可复用的 OpenAI 客户端。"""
+    key = (base_url, api_key, float(timeout))
+    with _CLIENT_LOCK:
+        client = _CLIENT_CACHE.get(key)
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+            _CLIENT_CACHE[key] = client
+        return client
 
 
 def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
@@ -49,9 +68,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if client is not None:
             self.client = client
         else:
-            from openai import OpenAI
-
-            self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+            self.client = _shared_client(api_key, base_url, timeout)
 
     @classmethod
     def from_settings(cls, settings: Any) -> "OpenAICompatibleLLM":

@@ -154,12 +154,22 @@ def _session_dir(args: argparse.Namespace, settings: Settings) -> str:
     )
 
 
-def _build_tools(mock: bool, settings: Settings, create_root: bool = True) -> ToolRegistry:
-    """按后端类型准备工具集：真实模式下额外提供受限代码工具。"""
+def _build_tools(
+    mock: bool,
+    settings: Settings,
+    create_root: bool = True,
+    agent_name: str | None = None,
+) -> ToolRegistry:
+    """按后端类型与智能体准备工具集。
+
+    代码工具只给 coding 智能体，避免别的智能体在工具清单里被"诱导"去跑代码。
+    """
     registry = ToolRegistry()
     register_builtin_tools(registry, include_search=not mock)
     if mock:
         register_demo_tools(registry)
+        return registry
+    if agent_name is not None and agent_name != "coding":
         return registry
     register_code_tools(
         registry,
@@ -246,11 +256,11 @@ def _run_command(args: argparse.Namespace) -> int:
 
     if args.llm == "mock":
         llm = demo_responses_llm(agent_name)
-        tools = _build_tools(mock=True, settings=settings)
+        tools = _build_tools(mock=True, settings=settings, agent_name=agent_name)
     else:
         settings.validate()
         llm = OpenAICompatibleLLM.from_settings(settings)
-        tools = _build_tools(mock=False, settings=settings)
+        tools = _build_tools(mock=False, settings=settings, agent_name=agent_name)
 
     agent = default_registry.create(
         agent_name,

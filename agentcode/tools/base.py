@@ -110,6 +110,31 @@ def parse_kwargs(raw_input: str) -> dict[str, str] | None:
     return kwargs or None
 
 
+def parse_known_kwargs(raw_input: str, keys: Iterable[str]) -> dict[str, str] | None:
+    """按**已知参数名**切分参数，容忍值里出现未转义的引号或逗号。
+
+    模型写 ``content="print("hi")"`` 这种内层引号没转义的内容时，
+    逐字符扫描引号会误判边界；这里改成"从参数名切刀"，把两把刀之间的整段
+    都当作值，代码里的引号和逗号就不会破坏解析。
+    """
+    key_list = [key for key in keys if key]
+    if not key_list:
+        return None
+    pattern = re.compile(r"(?<!\w)(" + "|".join(re.escape(key) for key in key_list) + r")\s*=\s*")
+    matches = list(pattern.finditer(raw_input))
+    if not matches:
+        return None
+
+    kwargs: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_input)
+        value = raw_input[start:end].strip()
+        value = value.rstrip().rstrip(",").strip()
+        kwargs[match.group(1)] = _unquote(value)
+    return kwargs or None
+
+
 class ToolRegistry:
     """工具注册表。"""
 
@@ -191,6 +216,9 @@ class ToolRegistry:
         if not text:
             return (), {}
         kwargs = parse_kwargs(text)
+        if kwargs is None:
+            # 退一步：按该工具声明的参数名切分，容忍值里的引号/逗号
+            kwargs = parse_known_kwargs(text, spec.parameters)
         if kwargs is not None:
             return (), kwargs
         return (text,), {}

@@ -292,12 +292,18 @@ function renderTranscript(messages) {
   els.messages.querySelectorAll(".msg").forEach((node) => node.remove());
   els.empty.hidden = currentTurnMessages.length > 0;
   currentTurnMessages.forEach((message) => {
-    appendMessage(message.role, message.content, undefined, message.success === false);
+    appendMessage(
+      message.role,
+      message.content,
+      undefined,
+      message.success === false,
+      message.artifacts || []
+    );
   });
   scrollToEnd();
 }
 
-function appendMessage(role, text, metaText, isError = false) {
+function appendMessage(role, text, metaText, isError = false, artifacts = []) {
   const wrapper = document.createElement("div");
   wrapper.className = `msg msg-${role}` + (isError ? " msg-error" : "");
   const body = document.createElement("div");
@@ -310,9 +316,84 @@ function appendMessage(role, text, metaText, isError = false) {
     meta.textContent = metaText;
     wrapper.appendChild(meta);
   }
+  const chips = buildArtifacts(artifacts);
+  if (chips) wrapper.appendChild(chips);
   els.messages.appendChild(wrapper);
   scrollToEnd();
   return wrapper;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  return `${(value / 1024).toFixed(1)} KB`;
+}
+
+function buildArtifacts(artifacts) {
+  if (!artifacts || !artifacts.length) return null;
+  const box = document.createElement("div");
+  box.className = "artifacts";
+  artifacts.forEach((item) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "artifact";
+    chip.title = `点击查看 ${item.path}`;
+    chip.innerHTML = `<span class="artifact-icon">📄</span><span class="artifact-path">${escapeHtml(
+      item.path
+    )}</span><span class="artifact-size">${formatBytes(item.bytes)}</span>`;
+    chip.addEventListener("click", () => openViewer(item.path, item.bytes));
+    box.appendChild(chip);
+  });
+  return box;
+}
+
+async function openViewer(path, bytes) {
+  let payload;
+  try {
+    payload = await (await fetch(`/api/file?path=${encodeURIComponent(path)}`)).json();
+  } catch (error) {
+    els.runStatus.textContent = `读取文件失败：${error.message}`;
+    return;
+  }
+  if (payload.error) {
+    els.runStatus.textContent = payload.error;
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "viewer";
+  overlay.innerHTML = `
+    <div class="viewer-panel" role="dialog" aria-modal="true" aria-label="文件内容">
+      <header class="viewer-head">
+        <span class="viewer-title"></span>
+        <button type="button" class="viewer-close" aria-label="关闭">✕</button>
+      </header>
+      <pre class="viewer-body"></pre>
+      <p class="viewer-meta"></p>
+    </div>`;
+  overlay.querySelector(".viewer-title").textContent = path;
+  overlay.querySelector(".viewer-body").textContent = payload.content;
+  overlay.querySelector(".viewer-meta").textContent = [
+    `共 ${payload.bytes} 字节`,
+    payload.truncated ? "内容过长，仅显示前 20000 字符" : "",
+  ]
+    .filter(Boolean)
+    .join("，");
+
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    overlay.remove();
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") close();
+  };
+  overlay.querySelector(".viewer-close").addEventListener("click", close);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+  void bytes;
 }
 
 function appendPending() {
@@ -337,6 +418,8 @@ function renderMessage(node, options) {
     meta.textContent = options.meta;
     node.appendChild(meta);
   }
+  const chips = buildArtifacts(options.artifacts);
+  if (chips) node.appendChild(chips);
   scrollToEnd();
 }
 
@@ -469,8 +552,14 @@ async function resolvePending(pending, result) {
     text: answer,
     meta,
     className: result.success ? "" : "msg-error",
+    artifacts: result.artifacts || [],
   });
-  currentTurnMessages.push({ role: "assistant", content: answer, success: result.success });
+  currentTurnMessages.push({
+    role: "assistant",
+    content: answer,
+    success: result.success,
+    artifacts: result.artifacts || [],
+  });
 
   await loadSessions();
   updateHeader(result.turn_index, result.memory_turns);

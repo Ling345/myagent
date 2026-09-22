@@ -22,10 +22,13 @@ from agentcode.tools import (
     register_code_tools,
     register_demo_tools,
 )
+from agentcode.tools.code import resolve_in_root
 from agentcode.web.sessions import SessionStore, default_session_dir
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 64 * 1024
+#: 单个文件的内容最多返回这么多字符（够看代码，又不至于撑爆前端）
+MAX_FILE_CHARS = 20000
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
@@ -193,7 +196,44 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/file":
+            self._serve_code_file()
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
+
+    def _serve_code_file(self) -> None:
+        """读取代码工作目录里的文本文件，供页面点击查看。"""
+        query = parse_qs(urlsplit(self.path).query)
+        relative = (query.get("path") or [""])[0]
+        if not relative:
+            self._send_json({"error": "缺少 path 参数。"}, status=400)
+            return
+
+        root = Path(self._settings().code_root).resolve()
+        try:
+            target = resolve_in_root(root, relative)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        if not target.is_file():
+            self._send_json({"error": f"文件不存在：{relative}"}, status=404)
+            return
+
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self._send_json({"error": f"读取失败：{exc}"}, status=500)
+            return
+
+        truncated = len(text) > MAX_FILE_CHARS
+        self._send_json(
+            {
+                "path": target.relative_to(root).as_posix(),
+                "content": text[:MAX_FILE_CHARS],
+                "bytes": target.stat().st_size,
+                "truncated": truncated,
+            }
+        )
 
     def do_POST(self) -> None:  # noqa: N802 - 父类约定的方法名
         from agentcode.web.runner import run_stream  # 延迟导入，避免循环依赖
