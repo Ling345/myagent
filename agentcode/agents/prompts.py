@@ -1,6 +1,16 @@
-"""各范式的提示词模板，集中放置便于对照与修改。"""
+"""各范式的提示词模板，集中放置便于对照与修改。
+
+三个模板里的 ``{history}`` 统一表示"更早的对话"（上下文记忆），
+本轮运行内部的过程（ReAct 的步骤、Plan-and-Solve 的执行进度）另有占位符，
+两者不要混用。
+"""
+
+NO_HISTORY_HINT = "（这是本次会话的第一轮，没有更早的对话）"
 
 REACT_PROMPT_TEMPLATE = """你是一个可以调用外部工具的智能助手。
+
+# 更早的对话
+{history}
 
 # 可用工具
 {tools}
@@ -12,12 +22,13 @@ Action: 需要执行的动作，取值为以下两种之一
 - 调用工具：工具名[输入]
 - 给出最终答案：Finish[最终答案]
 
-# 历史步骤
-{history}
+# 本轮已完成的步骤
+{steps}
 
 # 当前问题
 {question}
 
+如果当前问题是对更早对话的追问（例如"那另一个城市呢"），请结合更早的对话理解它。
 请开始作答。"""
 
 PLANNER_PROMPT_TEMPLATE = """你是一个顶级的任务规划专家。请把用户的问题拆解成若干个简单、可独立执行的步骤。
@@ -25,6 +36,9 @@ PLANNER_PROMPT_TEMPLATE = """你是一个顶级的任务规划专家。请把用
 1. 每个步骤都是一次可以直接回答的子任务，按逻辑顺序排列。
 2. 步骤数量控制在 3 到 6 个之间。
 3. 只输出一个 Python 字符串列表，用 python 代码块包裹。
+
+# 更早的对话
+{history}
 
 # 问题
 {question}
@@ -34,6 +48,9 @@ PLANNER_PROMPT_TEMPLATE = """你是一个顶级的任务规划专家。请把用
 
 EXECUTOR_PROMPT_TEMPLATE = """你是一个严谨的执行专家。请只完成"当前步骤"，并只输出该步骤的结果。
 
+# 更早的对话
+{history}
+
 # 原始问题
 {question}
 
@@ -41,7 +58,7 @@ EXECUTOR_PROMPT_TEMPLATE = """你是一个严谨的执行专家。请只完成"�
 {plan}
 
 # 已完成的步骤与结果
-{history}
+{progress}
 
 # 当前步骤
 {current_step}
@@ -50,6 +67,9 @@ EXECUTOR_PROMPT_TEMPLATE = """你是一个严谨的执行专家。请只完成"�
 
 REFLECTION_INITIAL_TEMPLATE = """你是一位资深 Python 程序员。请根据下面的要求编写代码。
 代码需要包含完整函数签名、文档字符串，并遵循 PEP 8 规范。
+
+# 更早的对话
+{history}
 
 # 要求
 {task}
@@ -69,6 +89,9 @@ REFLECTION_CRITIQUE_TEMPLATE = """你是一位极其严格的代码评审专家�
 如果当前实现已经是该问题的常规最优解，请只回复"无需改进"。"""
 
 REFLECTION_REFINE_TEMPLATE = """你是一位资深 Python 程序员。请根据评审意见改进下面的代码。
+
+# 更早的对话
+{history}
 
 # 原始要求
 {task}

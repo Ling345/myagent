@@ -23,9 +23,9 @@ class Planner:
     def __init__(self, think: ThinkFn) -> None:
         self._think = think
 
-    def plan(self, question: str, ctx: RunContext) -> list[str]:
+    def plan(self, question: str, ctx: RunContext, history: str) -> list[str]:
         """生成行动计划；解析失败时返回空列表。"""
-        prompt = PLANNER_PROMPT_TEMPLATE.format(question=question)
+        prompt = PLANNER_PROMPT_TEMPLATE.format(question=question, history=history)
         raw = self._think([{"role": "user", "content": prompt}], ctx)
         return parse_plan(raw)
 
@@ -36,19 +36,20 @@ class Executor:
     def __init__(self, think: ThinkFn) -> None:
         self._think = think
 
-    def execute(self, question: str, plan: list[str], ctx: RunContext) -> str:
+    def execute(self, question: str, plan: list[str], ctx: RunContext, history: str) -> str:
         """依次执行每个步骤，返回最后一步的结果。"""
-        history = ""
+        progress = ""
         final_answer = ""
         for index, step in enumerate(plan, start=1):
             prompt = EXECUTOR_PROMPT_TEMPLATE.format(
                 question=question,
                 plan=plan,
-                history=history or "（暂无）",
+                history=history,
+                progress=progress or "（暂无）",
                 current_step=step,
             )
             result = self._think([{"role": "user", "content": prompt}], ctx)
-            history += f"步骤 {index}: {step}\n结果: {result}\n\n"
+            progress += f"步骤 {index}: {step}\n结果: {result}\n\n"
             final_answer = result
             ctx.add_step(
                 Step(
@@ -72,8 +73,9 @@ class PlanAndSolveAgent(BaseAgent):
     def run(self, task: str, context: RunContext | None = None) -> AgentResult:
         """先规划再执行。"""
         ctx = context or self._new_context(task)
+        history = self._history_text()
         try:
-            plan = Planner(self._think).plan(task, ctx)
+            plan = Planner(self._think).plan(task, ctx, history)
         except LLMError as exc:
             return self._build_result(task, "", ctx, success=False, error=f"调用模型失败：{exc}")
 
@@ -88,12 +90,12 @@ class PlanAndSolveAgent(BaseAgent):
 
         trimmed = plan[: self.max_steps]
         try:
-            answer = Executor(self._think).execute(task, trimmed, ctx)
+            answer = Executor(self._think).execute(task, trimmed, ctx, history)
         except LLMError as exc:
             return self._build_result(task, "", ctx, success=False, error=f"调用模型失败：{exc}")
 
         extra = {"plan": plan, "executed_steps": len(trimmed)}
         if len(plan) > len(trimmed):
             extra["plan_truncated"] = True
-        self.memory.add_turn([{"role": "assistant", "content": answer}])
+        self._remember(task, answer)
         return self._build_result(task, answer, ctx, extra=extra)

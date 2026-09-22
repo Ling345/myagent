@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.config import Settings
+from agentcode.core.agent import BaseAgent
 from agentcode.core.context import RunContext
 from agentcode.core.errors import AgentCodeError
 from agentcode.core.registry import default_registry
@@ -24,6 +25,7 @@ from agentcode.llm.openai_compatible import OpenAICompatibleLLM
 from agentcode.middleware import RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
+from agentcode.web.sessions import AgentSessionStore
 
 Event = dict[str, Any]
 Emitter = Callable[[Event], None]
@@ -61,14 +63,22 @@ def build_tools(mock: bool) -> ToolRegistry:
     return registry
 
 
-def build_agent(
+def build_middlewares(emit: Emitter, settings: Settings) -> list[Middleware]:
+    """组装网页侧的中间件链（顺序即包装顺序，最外层在前）。"""
+    return [
+        EventMiddleware(emit),
+        RetryMiddleware(max_retries=2, base_delay=0.2),
+        TimeoutMiddleware(timeout=settings.timeout),
+    ]
+
+
+def create_backend(
     agent_name: str,
     llm_mode: str,
     settings: Settings,
-    emit: Emitter,
     max_steps: int | None = None,
-) -> Any:
-    """装配一次运行所需的智能体实例（每次请求都新建，避免状态串场）。"""
+) -> BaseAgent:
+    """装配一个智能体实例（模型与工具；中间件随后注入）。"""
     if llm_mode == "mock":
         llm = demo_responses_llm(agent_name)
         tools = build_tools(mock=True)
@@ -81,11 +91,6 @@ def build_agent(
         agent_name,
         llm=llm,
         tools=tools,
-        middlewares=[
-            EventMiddleware(emit),
-            RetryMiddleware(max_retries=2, base_delay=0.2),
-            TimeoutMiddleware(timeout=settings.timeout),
-        ],
         max_steps=max_steps or settings.max_steps,
     )
 
@@ -97,8 +102,14 @@ def run_stream(
     llm_mode: str = "mock",
     max_steps: int | None = None,
     settings: Settings | None = None,
+    session_store: AgentSessionStore | None = None,
+    session_id: str | None = None,
 ) -> Iterator[Event]:
-    """在后台线程里执行智能体，把事件按发生顺序逐条产出。"""
+    """在后台线程里执行智能体，把事件按发生顺序逐条产出。
+
+    带上 ``session_store`` 与 ``session_id`` 时复用同一个智能体实例，
+    上下文记忆因此可以在多次提问之间延续。
+    """
     events: queue.Queue[Event | None] = queue.Queue()
 
     def emit(event: Event) -> None:
@@ -111,9 +122,22 @@ def run_stream(
                 task=task,
                 on_step=lambda step: emit({"type": "step", "data": step.to_dict()}),
             )
-            agent = build_agent(agent_name, llm_mode, active_settings, emit, max_steps)
+
+            if session_store is not None and session_id:
+                agent = session_store.get(
+                    session_id,
+                    lambda: create_backend(agent_name, llm_mode, active_settings, max_steps),
+                )
+            else:
+                agent = create_backend(agent_name, llm_mode, active_settings, max_steps)
+
+            # 中间件绑定本次请求的事件出口，所以每次请求都换一套
+            agent.middlewares = build_middlewares(emit, active_settings)
+
             result = agent.run(task, context=ctx)
-            emit({"type": "answer", "data": result.to_dict()})
+            payload = result.to_dict()
+            payload["memory_turns"] = len(agent.memory)
+            emit({"type": "answer", "data": payload})
         except AgentCodeError as exc:
             emit({"type": "error", "data": {"message": str(exc)}})
         except Exception as exc:  # noqa: BLE001 - 兜底，避免线程静默死掉

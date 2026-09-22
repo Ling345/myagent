@@ -38,9 +38,16 @@ class ReflectionAgent(BaseAgent):
     def run(self, task: str, context: RunContext | None = None) -> AgentResult:
         """执行初始生成与最多 ``max_iterations`` 轮反思优化。"""
         ctx = context or self._new_context(task)
+        history = self._history_text()
         try:
             current = self._think(
-                [{"role": "user", "content": REFLECTION_INITIAL_TEMPLATE.format(task=task)}], ctx
+                [
+                    {
+                        "role": "user",
+                        "content": REFLECTION_INITIAL_TEMPLATE.format(task=task, history=history),
+                    }
+                ],
+                ctx,
             )
         except LLMError as exc:
             return self._build_result(task, "", ctx, success=False, error=f"调用模型失败：{exc}")
@@ -80,7 +87,7 @@ class ReflectionAgent(BaseAgent):
                 )
             )
             if self._needs_no_improvement(feedback):
-                self.memory.add_turn([{"role": "assistant", "content": feedback}])
+                self._remember(task, feedback)
                 return self._build_result(
                     task,
                     feedback,
@@ -94,7 +101,7 @@ class ReflectionAgent(BaseAgent):
                         {
                             "role": "user",
                             "content": REFLECTION_REFINE_TEMPLATE.format(
-                                task=task, last_code=current, feedback=feedback
+                                task=task, last_code=current, feedback=feedback, history=history
                             ),
                         }
                     ],
@@ -115,7 +122,7 @@ class ReflectionAgent(BaseAgent):
                 )
             )
 
-        self.memory.add_turn([{"role": "assistant", "content": current}])
+        self._remember(task, current)
         return self._build_result(
             task,
             current,

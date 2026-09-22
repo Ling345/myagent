@@ -25,4 +25,5 @@ class EchoAgent(BaseAgent):
         ctx.add_step(
             Step(index=ctx.next_index(), thought="无需调用模型", action="回显任务", answer=answer)
         )
+        self._remember(task, answer)
         return self._build_result(task, answer, ctx)

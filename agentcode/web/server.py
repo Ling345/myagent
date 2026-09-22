@@ -16,6 +16,7 @@ from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.config import Settings
 from agentcode.core.registry import default_registry
 from agentcode.tools import ToolRegistry, register_builtin_tools, register_demo_tools
+from agentcode.web.sessions import AgentSessionStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 64 * 1024
@@ -76,7 +77,7 @@ def config_payload(settings: Settings) -> dict[str, Any]:
 
 
 class AgentCodeRequestHandler(BaseHTTPRequestHandler):
-    """处理静态页面与三个接口。"""
+    """处理静态页面与接口。"""
 
     server_version = "AgentCodeWeb/0.1"
     protocol_version = "HTTP/1.1"
@@ -161,12 +162,21 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         from agentcode.web.runner import run_stream  # 延迟导入，避免循环依赖
 
         path = self.path.split("?", 1)[0]
-        if path != "/api/run":
+        if path not in ("/api/run", "/api/session/reset"):
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
             return
 
         payload = self._read_json()
         if payload is None:
+            return
+
+        session_store: AgentSessionStore = self.server.sessions  # type: ignore[attr-defined]
+        raw_session = str(payload.get("session_id") or "").strip()
+        session_id = raw_session or None
+
+        if path == "/api/session/reset":
+            removed = session_store.reset(session_id) if session_id else False
+            self._send_json({"reset": removed, "session_id": session_id})
             return
 
         task = str(payload.get("task") or "").strip()
@@ -201,6 +211,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 llm_mode=llm_mode,
                 max_steps=max_steps,
                 settings=settings,
+                session_store=session_store,
+                session_id=session_id,
             ):
                 chunk = (
                     f"event: {event['type']}\n"
@@ -220,6 +232,7 @@ def create_server(
     llm_mode: str = "mock",
     env_file: str | None = None,
     quiet: bool = True,
+    max_sessions: int = 20,
 ) -> ThreadingHTTPServer:
     """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。"""
     server = ThreadingHTTPServer((host, port), AgentCodeRequestHandler)
@@ -227,6 +240,7 @@ def create_server(
     server.llm_mode = llm_mode  # type: ignore[attr-defined]
     server.env_file = env_file  # type: ignore[attr-defined]
     server.quiet = quiet  # type: ignore[attr-defined]
+    server.sessions = AgentSessionStore(max_sessions=max_sessions)  # type: ignore[attr-defined]
     return server
 
 
@@ -250,6 +264,7 @@ def serve(
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上可以切换）")
+    print("同一个页面标签页会自动延续上下文记忆，想重新开始就点页面上的「新会话」。")
     print("这个窗口就是服务本身：关闭窗口或按 Ctrl+C 即可停止。")
     if open_browser:
         webbrowser.open(url)

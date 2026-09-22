@@ -1,4 +1,4 @@
-"""智能体基类：统一依赖注入、中间件链、轨迹记录与结果构造。"""
+"""智能体基类：统一依赖注入、中间件链、轨迹记录、上下文记忆与结果构造。"""
 
 from __future__ import annotations
 
@@ -14,13 +14,16 @@ from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 from agentcode.tools.base import ToolRegistry
 
 DEFAULT_MAX_STEPS = 6
+#: 上下文记忆默认保留的轮数（一轮 = 一次提问 + 一次回答）
+DEFAULT_MEMORY_TURNS = 5
 
 
 class BaseAgent(ABC):
     """所有智能体的共同骨架。
 
     子类只需要实现 :meth:`run`，并使用 :meth:`_think` / :meth:`_call_tool`
-    发起调用，即可自动获得中间件、用量统计与轨迹记录能力。
+    发起调用，即可自动获得中间件、用量统计与轨迹记录能力；
+    在给出最终答案时调用 :meth:`_remember`，上下文记忆就会延续到下一轮。
     """
 
     #: 注册表中使用的名称
@@ -42,7 +45,9 @@ class BaseAgent(ABC):
         self.llm = llm
         self.tools = tools if tools is not None else ToolRegistry()
         self.middlewares: list[Middleware] = list(middlewares or [])
-        self.memory = memory if memory is not None else ShortTermMemory()
+        self.memory = (
+            memory if memory is not None else ShortTermMemory(max_turns=DEFAULT_MEMORY_TURNS)
+        )
         self.max_steps = max_steps or DEFAULT_MAX_STEPS
         self.temperature = temperature
         if name:
@@ -117,13 +122,29 @@ class BaseAgent(ABC):
         )
         return observation
 
+    # ------------------------------------------------------------------ 记忆
+
+    def _history_text(self) -> str:
+        """把更早的对话渲染成提示词片段。"""
+        dialogue = self.memory.as_dialogue()
+        return dialogue or "（这是本次会话的第一轮，没有更早的对话）"
+
+    def _remember(self, task: str, answer: str) -> None:
+        """一轮成功结束后，把"用户提问 + 最终答案"整体写入记忆。"""
+        if not answer:
+            return
+        self.memory.add_turn(
+            [
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": answer},
+            ]
+        )
+
     # ------------------------------------------------------------------ 结果
 
     def _new_context(self, task: str) -> RunContext:
-        """创建运行上下文，并把任务写入短期记忆。"""
-        ctx = RunContext(task=task)
-        self.memory.add_turn([{"role": "user", "content": task}])
-        return ctx
+        """创建本次运行的上下文。"""
+        return RunContext(task=task)
 
     def _build_result(
         self,

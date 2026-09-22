@@ -23,7 +23,7 @@ class EchoAgent(BaseAgent):
     def run(self, task, context=None):
         ctx = context or self._new_context(task)
         answer = self._think([{"role": "user", "content": task}], ctx)
-        self.memory.add_turn([{"role": "assistant", "content": answer}])
+        self._remember(task, answer)
         return self._build_result(task, answer, ctx)
 
 
@@ -79,10 +79,13 @@ def test_result_records_token_usage():
     assert result.steps == []
 
 
-def test_new_context_stores_task_in_memory():
+def test_run_stores_task_and_answer_in_memory():
     agent = EchoAgent(llm=ScriptedLLM(["好的"]), tools=ToolRegistry())
     agent.run("你好")
-    assert agent.memory.get_messages()[0]["content"] == "你好"
+    messages = agent.memory.get_messages()
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "你好"
+    assert messages[1]["content"] == "好的"
 
 
 def test_build_result_carries_extra_fields():

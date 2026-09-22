@@ -1,7 +1,7 @@
 # AgentCode：可扩展的 Python 智能体框架
 
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
-新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，只给结果，不展示推理过程。
+新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，只给结果，但记住你们的对话。
 
 内置三种经典范式：
 
@@ -24,12 +24,35 @@ D:\Anaconda\python.exe -m agentcode open
 # 4. 命令行离线演示（不需要任何密钥）
 D:\Anaconda\python.exe -m agentcode run --agent react --llm mock --task "帮我看看北京今天适合去哪里"
 
-# 5. 命令行使用真实模型
-D:\Anaconda\python.exe -m agentcode run --agent react --task "帮我查一下北京天气并推荐景点" --trace traces/run.json
+# 5. 命令行使用真实模型，并带上下文会话
+D:\Anaconda\python.exe -m agentcode run --agent react --session 北京游 --task "帮我查一下北京天气并推荐景点"
 
 # 6. 其它子命令
 D:\Anaconda\python.exe -m agentcode list
 D:\Anaconda\python.exe -m agentcode config
+```
+
+## 上下文记忆
+
+记忆在三个范式里都会真正参与推理：每轮结束后，把「用户提问 + 最终答案」整体写入短期记忆，
+下一轮渲染进提示词，所以「那上海呢」这种指代型追问能听懂。默认保留最近 **5 轮**，
+超出后丢弃最早的（`ShortTermMemory(max_turns=...)` 可调）。失败的运行不写记忆，
+因此上下文里不会留下"只问没答"的半截记录。
+
+网页端按标签页维度自动延续上下文：
+
+- 页面在 `localStorage` 里放一个会话标识，每次运行带上它，服务端复用同一个智能体实例（记忆随之延续）。
+- 答案下面会标出「本次会话第 N 轮」，侧栏也会提示当前记住了几轮。
+- 点侧栏的「新会话」即可清空上下文重新开始；服务端最多保留 20 个会话，按最近使用淘汰。
+- 服务端只保存内存里的会话，重启服务即全部清空。
+
+命令行用 `--session 名字` 显式开启会话，记忆会落盘到 `traces/sessions/<名字>.json`，
+下次同名会话自动接着聊（`--session-dir` 可改目录）：
+
+```powershell
+D:\Anaconda\python.exe -m agentcode run --task "请记住：我最喜欢的城市是杭州" --session 备忘
+D:\Anaconda\python.exe -m agentcode run --task "我最喜欢的城市是哪个？" --session 备忘
+# 第二次会先打印「已载入会话「备忘」的 1 轮上下文。」，再直接答出杭州
 ```
 
 ## 网站入口与网页
@@ -43,8 +66,7 @@ D:\Anaconda\python.exe -m agentcode config
 | 自己管端口 | `D:\Anaconda\python.exe -m agentcode web --port 8080 --open` |
 
 `open` 会先探测端口：已经在运行就直接打开浏览器，没运行就以当前窗口启动服务并打开浏览器。
-服务地址默认 `http://127.0.0.1:8000/`。**这个窗口就是服务本身**，关掉窗口（或按 Ctrl+C）服务就停了；
-下次再双击 `启动网页.cmd` 即可。
+服务地址默认 `http://127.0.0.1:8000/`。**这个窗口就是服务本身**，关掉窗口（或按 Ctrl+C）服务就停了。
 
 页面**只给结果**：左侧选智能体、填任务、选模型，点运行后先显示进度计时，结束后直接给出荧光黄标注的最终答案，
 没有推理过程、思考内容或工具调用记录的任何入口。想拿完整执行记录时，点「导出完整结果 JSON」可以得到每一步的原始数据。
@@ -52,9 +74,6 @@ D:\Anaconda\python.exe -m agentcode config
 实现上分成两层：`agentcode/web/runner.py` 把一次运行变成事件流（`status` / `step` / `answer` / `error`），
 `agentcode/web/server.py` 用标准库 `http.server` 把它以 SSE 推给浏览器。整个过程**不新增任何依赖**，
 前端是一个不依赖框架和构建步骤的页面。服务只监听 `127.0.0.1`，不做鉴权，请勿暴露到公网。
-
-实时推送靠 `RunContext` 上的一个可选观察者回调 `on_step`；页面当前只渲染 `answer` 事件，
-所以以后想改回显示某几步（比如只显示工具名）不需要动后端。
 
 ## 架构
 
@@ -64,10 +83,10 @@ CLI (agentcode.cli)  ──  agentcode web / open  ──▶  Web 层 (agentcode
       ▼                                                    ▼
 Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
       │
-      ├──▶ BaseAgent (agentcode.core.agent) ──▶ Middleware 链（日志/重试/超时/用量）
+      ├──▶ BaseAgent (agentcode.core.agent) ──▶ 上下文记忆 + Middleware 链（日志/重试/超时/用量）
       ├──▶ BaseLLM   (agentcode.llm.*)      ── openai 兼容实现 + 离线脚本模型
       ├──▶ ToolRegistry (agentcode.tools.*) ── 工具注册、描述、安全调用
-      └──▶ Memory (agentcode.memory.*)      ── 短期记忆与轨迹落盘
+      └──▶ Memory (agentcode.memory.*)      ── 短期记忆、磁盘会话、结果落盘
 
 配置：agentcode.config.Settings  ←  .env / JSON 配置文件
 结果：AgentResult / Step（可导出为完整结果 JSON）
@@ -80,10 +99,10 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
 | `agentcode/core/` | 基类、注册表、解析器、运行上下文与结果结构 |
 | `agentcode/llm/` | LLM 后端：OpenAI 兼容 + 离线脚本模型 |
 | `agentcode/tools/` | 工具注册表与内置工具（搜索、计算器、时间） |
-| `agentcode/memory/` | 短期记忆、JSON 轨迹读写 |
+| `agentcode/memory/` | 短期记忆、磁盘会话读写、结果落盘 |
 | `agentcode/middleware/` | 日志、重试、超时、token 统计 |
 | `agentcode/agents/` | ReAct、Plan-and-Solve、Reflection、Echo 示例 |
-| `agentcode/web/` | 本地网页：事件流运行器与零依赖 HTTP 服务 |
+| `agentcode/web/` | 本地网页：事件流运行器、会话表、零依赖 HTTP 服务 |
 | `启动网页.cmd` | 双击启动服务并打开浏览器 |
 | `tests/` | 全离线单元测试 |
 
@@ -138,13 +157,15 @@ class MyAgent(BaseAgent):
 
     def run(self, task: str, context=None) -> AgentResult:
         ctx = context or self._new_context(task)
-        reply = self._think([{"role": "user", "content": task}], ctx)
+        prompt = f"更早的对话：\n{self._history_text()}\n\n当前问题：{task}"
+        reply = self._think([{"role": "user", "content": prompt}], ctx)
+        self._remember(task, reply)
         return self._build_result(task, reply, ctx)
 ```
 
-在 `agentcode/agents/__init__.py` 中导入一次即完成注册，随后
-`python -m agentcode run --agent my_agent` 和网页上的智能体列表都会出现它。
-`agentcode/agents/echo.py` 是可运行的最小示例。
+三个钩子就是上下文记忆的全部成本：`self._history_text()` 读，`self._remember()` 写，
+`self._new_context()` 建本次运行上下文。在 `agentcode/agents/__init__.py` 里导入一次即完成注册，
+随后命令行和网页的智能体列表都会出现它。`agentcode/agents/echo.py` 是可运行的最小示例。
 
 ### 新增一个工具
 
@@ -187,8 +208,9 @@ def add(a: str, b: str) -> str:
 D:\Anaconda\python.exe -m pytest -q
 ```
 
-103 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
-其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证，入口命令也做了端口探测的覆盖。
+118 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度；
+其中网页部分通过真实 HTTP 请求与 SSE 流解析做端到端验证，上下文记忆覆盖了
+「第二轮提示词里能看到第一轮的答案」「超限裁剪」「会话隔离」「新会话清空」「磁盘会话读写」。
 
 ## 设计文档与实现计划
 

@@ -50,6 +50,11 @@
 
           <button type="submit" id="run-button" class="primary">运行</button>
           <p id="run-status" class="run-status" role="status" aria-live="polite"></p>
+
+          <div class="rail-actions">
+            <button type="button" id="new-session-button" class="ghost">新会话</button>
+          </div>
+          <p class="hint" id="session-hint"></p>
         </form>
 
         <footer class="rail-foot">
@@ -60,7 +65,7 @@
       <main class="stream">
         <div class="empty" id="empty">
           <p>在左侧选一个智能体，写下任务，然后点运行。</p>
-          <p class="hint">结果会显示在这里。</p>
+          <p class="hint">结果会显示在这里；这个标签页里的追问会自动带上之前的上下文。</p>
         </div>
 
         <section class="answer" id="answer" hidden>

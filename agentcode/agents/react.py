@@ -18,21 +18,23 @@ class ReActAgent(BaseAgent):
     name = "react"
     description = "ReAct 范式：边推理边调用工具，适合需要实时信息的任务。"
 
-    def _build_prompt(self, task: str, history: list[str]) -> str:
+    def _build_prompt(self, task: str, steps: list[str], history: str) -> str:
         """渲染当轮提示词。"""
         return REACT_PROMPT_TEMPLATE.format(
             tools=self.tools.describe(),
             question=task,
-            history="\n".join(history) if history else "（暂无）",
+            history=history,
+            steps="\n".join(steps) if steps else "（暂无）",
         )
 
     def run(self, task: str, context: RunContext | None = None) -> AgentResult:
         """执行 ReAct 循环直到给出最终答案或达到步数上限。"""
         ctx = context or self._new_context(task)
-        history: list[str] = []
+        history = self._history_text()
+        steps: list[str] = []
 
         for _ in range(self.max_steps):
-            prompt = self._build_prompt(task, history)
+            prompt = self._build_prompt(task, steps, history)
             try:
                 raw = self._think([{"role": "user", "content": prompt}], ctx)
             except LLMError as exc:
@@ -48,7 +50,7 @@ class ReActAgent(BaseAgent):
                         error="模型输出缺少 Action 字段",
                     )
                 )
-                history.append(
+                steps.append(
                     f"模型输出：{raw.strip()}\n"
                     "Observation: 输出缺少 Action 字段，请严格使用 Thought 与 Action 两行格式。"
                 )
@@ -59,7 +61,7 @@ class ReActAgent(BaseAgent):
                 ctx.add_step(
                     Step(index=ctx.next_index(), thought=thought or "", action=action, answer=answer)
                 )
-                self.memory.add_turn([{"role": "assistant", "content": answer}])
+                self._remember(task, answer)
                 return self._build_result(task, answer, ctx)
 
             tool_name, tool_input = parse_action(action)
@@ -72,7 +74,7 @@ class ReActAgent(BaseAgent):
                         error="无法解析工具名称",
                     )
                 )
-                history.append(
+                steps.append(
                     f"Action: {action}\n"
                     "Observation: 无法解析该行动，请使用 工具名[输入] 或 Finish[答案] 的格式。"
                 )
@@ -85,7 +87,7 @@ class ReActAgent(BaseAgent):
                 thought=thought or "",
                 action=action,
             )
-            history.append(f"Action: {action}\nObservation: {observation}")
+            steps.append(f"Action: {action}\nObservation: {observation}")
 
         return self._build_result(
             task,

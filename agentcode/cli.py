@@ -15,7 +15,8 @@ from agentcode.core.registry import default_registry
 from agentcode.core.result import AgentResult
 from agentcode.llm.mock import demo_responses_llm
 from agentcode.llm.openai_compatible import OpenAICompatibleLLM
-from agentcode.memory.json_store import JsonStore
+from agentcode.memory import FileSessionStore, JsonStore
+from agentcode.memory.session_store import DEFAULT_SESSION_DIR
 from agentcode.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -68,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--trace", default=None, help="把运行轨迹写入指定 JSON 文件")
     run_parser.add_argument("--json", action="store_true", help="以 JSON 形式输出结果")
     run_parser.add_argument("--quiet", action="store_true", help="不打印过程日志")
+    run_parser.add_argument(
+        "--session",
+        default=None,
+        help="会话名称；带上它就能跨次运行延续上下文，例如 --session 北京游",
+    )
+    run_parser.add_argument(
+        "--session-dir", default=None, help=f"会话文件目录，默认 {DEFAULT_SESSION_DIR}"
+    )
     run_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     run_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
@@ -122,6 +131,15 @@ def _web_target(args: argparse.Namespace, settings: Settings) -> tuple[str, int,
     port = args.port if args.port is not None else int(settings.extra.get("web_port", DEFAULT_PORT))
     llm_mode = args.llm or settings.extra.get("llm_mode") or "mock"
     return host, port, llm_mode
+
+
+def _session_dir(args: argparse.Namespace, settings: Settings) -> str:
+    """解析会话文件目录。"""
+    return (
+        getattr(args, "session_dir", None)
+        or settings.extra.get("session_dir")
+        or DEFAULT_SESSION_DIR
+    )
 
 
 def _build_tools(mock: bool) -> ToolRegistry:
@@ -194,6 +212,10 @@ def _run_command(args: argparse.Namespace) -> int:
         print("错误：任务不能为空，请通过 --task 或交互式输入提供。")
         return 2
 
+    session_name = getattr(args, "session", None)
+    session_store = FileSessionStore(_session_dir(args, settings)) if session_name else None
+    memory = session_store.load(session_name) if session_store else None
+
     if args.llm == "mock":
         llm = demo_responses_llm(agent_name)
         tools = _build_tools(mock=True)
@@ -208,12 +230,19 @@ def _run_command(args: argparse.Namespace) -> int:
         tools=tools,
         middlewares=_build_middlewares(settings, quiet=args.quiet),
         max_steps=settings.max_steps,
+        memory=memory,
     )
+    if session_store and len(agent.memory):
+        print(f"已载入会话「{session_name}」的 {len(agent.memory)} 轮上下文。")
+
     result = agent.run(task)
 
+    if session_store:
+        saved = session_store.save(session_name, agent.memory)
+        print(f"会话已保存：{saved}（共 {len(agent.memory)} 轮）")
     if args.trace:
-        saved = JsonStore.save(result.to_dict(), args.trace)
-        print(f"轨迹已写入：{saved}")
+        saved_trace = JsonStore.save(result.to_dict(), args.trace)
+        print(f"轨迹已写入：{saved_trace}")
     if args.json:
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     else:

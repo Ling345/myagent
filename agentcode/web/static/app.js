@@ -2,6 +2,7 @@
 
 const PREFERRED_AGENT = "react";
 const TIMER_INTERVAL_MS = 200;
+const SESSION_KEY = "agentcode-session";
 
 const els = {
   form: document.getElementById("run-form"),
@@ -9,6 +10,8 @@ const els = {
   task: document.getElementById("task"),
   runButton: document.getElementById("run-button"),
   runStatus: document.getElementById("run-status"),
+  sessionHint: document.getElementById("session-hint"),
+  newSessionButton: document.getElementById("new-session-button"),
   configList: document.getElementById("config-list"),
   empty: document.getElementById("empty"),
   answer: document.getElementById("answer"),
@@ -25,6 +28,7 @@ const state = {
   running: false,
   lastResult: null,
   timer: null,
+  memorySessionId: null,
 };
 
 function escapeHtml(value) {
@@ -39,9 +43,47 @@ function formatSeconds(ms) {
   return `${(Number(ms || 0) / 1000).toFixed(1)} 秒`;
 }
 
+/* ------------------------------------------------------- 会话标识（上下文） */
+
+function newSessionId() {
+  if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+  return `s-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function sessionId() {
+  try {
+    let id = window.localStorage.getItem(SESSION_KEY);
+    if (!id) {
+      id = newSessionId();
+      window.localStorage.setItem(SESSION_KEY, id);
+    }
+    return id;
+  } catch (error) {
+    // 隐私模式下 localStorage 可能不可用，退回内存里的标识
+    if (!state.memorySessionId) state.memorySessionId = newSessionId();
+    return state.memorySessionId;
+  }
+}
+
+function storeSessionId(id) {
+  try {
+    window.localStorage.setItem(SESSION_KEY, id);
+  } catch (error) {
+    state.memorySessionId = id;
+  }
+}
+
+function updateSessionHint(turns) {
+  els.sessionHint.textContent =
+    turns > 0
+      ? `当前会话已记住 ${turns} 轮上下文，追问时不必重复背景。`
+      : "当前会话还没有上下文，提问一次之后就会记住。";
+}
+
 /* ------------------------------------------------------------ 加载元信息 */
 
 async function loadMeta() {
+  updateSessionHint(0);
   try {
     const [agentsResponse, configResponse] = await Promise.all([
       fetch("/api/agents"),
@@ -111,6 +153,7 @@ async function submitRun(event) {
     agent: data.get("agent"),
     llm: data.get("llm"),
     task,
+    session_id: sessionId(),
   };
 
   clearResult();
@@ -137,6 +180,24 @@ async function submitRun(event) {
     stopProgressTimer();
     setRunning(false);
   }
+}
+
+async function startNewSession() {
+  if (state.running) return;
+  const previous = sessionId();
+  try {
+    await fetch("/api/session/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: previous }),
+    });
+  } catch (error) {
+    // 服务没起来也不影响本地换一个会话标识
+  }
+  storeSessionId(newSessionId());
+  clearResult();
+  updateSessionHint(0);
+  els.runStatus.textContent = "已开始新会话，上下文已清空。";
 }
 
 function startProgressTimer(startedAt) {
@@ -209,12 +270,17 @@ function showAnswer(result) {
   els.exportButton.disabled = false;
   els.answerText.textContent = result.answer || "（这次没有得出结论）";
   const usage = result.usage || {};
+  const turns = Number(result.memory_turns || 0);
   els.answerMeta.textContent = [
     result.success ? "已完成" : "未得出结论",
+    turns > 0 ? `本次会话第 ${turns} 轮` : "",
     `模型调用 ${usage.calls || 0} 次`,
     `约 ${usage.total_tokens || 0} token${usage.estimated ? "（估算）" : ""}`,
     `耗时 ${formatSeconds(result.duration_ms)}`,
-  ].join("，");
+  ]
+    .filter(Boolean)
+    .join("，");
+  updateSessionHint(turns);
   els.runStatus.textContent = `已完成，用时 ${formatSeconds(result.duration_ms)}`;
 }
 
@@ -256,6 +322,7 @@ function exportResult() {
 }
 
 els.form.addEventListener("submit", submitRun);
+els.newSessionButton.addEventListener("click", startNewSession);
 els.exportButton.addEventListener("click", exportResult);
 els.clearButton.addEventListener("click", clearResult);
 

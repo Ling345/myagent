@@ -161,10 +161,14 @@ textarea::placeholder {
 }
 
 .hint {
-  margin: 8px 0 0;
+  margin: 0;
   color: var(--ink-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.mode-switch + .hint {
+  margin-top: 8px;
 }
 
 button {
@@ -199,6 +203,11 @@ button:disabled {
 
 .ghost:hover:not(:disabled) {
   border-color: var(--ink);
+}
+
+.rail-actions {
+  display: flex;
+  gap: 10px;
 }
 
 .run-status {
