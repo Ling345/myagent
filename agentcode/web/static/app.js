@@ -25,6 +25,8 @@ const state = {
   running: false,
   timer: null,
   memorySessionId: null,
+  //: 是否跟随最新消息（用户往上翻看历史时置为 false，翻回底部再恢复）
+  followTail: true,
 };
 
 function escapeHtml(value) {
@@ -300,7 +302,9 @@ function renderTranscript(messages) {
       message.artifacts || []
     );
   });
-  scrollToEnd();
+  // 切换会话时总是跳到最新一条，不沿用上一个会话的跟随状态
+  state.followTail = true;
+  scrollToEnd(true);
 }
 
 function appendMessage(role, text, metaText, isError = false, artifacts = []) {
@@ -423,8 +427,20 @@ function renderMessage(node, options) {
   scrollToEnd();
 }
 
-function scrollToEnd() {
-  els.messages.scrollTop = els.messages.scrollHeight;
+function isNearBottom() {
+  const box = els.messages;
+  return box.scrollHeight - box.clientHeight - box.scrollTop <= 120;
+}
+
+function scrollToEnd(force = false) {
+  const box = els.messages;
+  if (!force && !state.followTail) return;
+  const apply = () => {
+    box.scrollTop = box.scrollHeight;
+  };
+  apply();
+  // 新内容的高度（字体、代码块、产物胶囊）可能这一帧之后才定下来，补一次
+  window.requestAnimationFrame(apply);
 }
 
 /* -------------------------------------------------------------- 运行流程 */
@@ -618,6 +634,9 @@ els.task.addEventListener("keydown", (event) => {
     event.preventDefault();
     if (!els.sendButton.disabled) els.form.requestSubmit();
   }
+});
+els.messages.addEventListener("scroll", () => {
+  state.followTail = isNearBottom();
 });
 
 async function boot() {

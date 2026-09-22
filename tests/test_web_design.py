@@ -71,3 +71,11 @@ def test_session_list_fills_freed_space():
     css = _css()
     assert "flex: 1 1 auto" in css  # 会占据侧栏剩余高度
     assert "max-height: none" in css  # 不再被人为限高
+
+
+def test_message_area_is_height_constrained():
+    """回归：grid 行高必须写死且子项允许收缩，否则内容会撑破 100vh、
+    多出来的部分既看不见也滚不到（真实故障：同一问题多问几次后滑不到底）。"""
+    css = _css()
+    assert "grid-template-rows: 100vh" in css
+    assert "min-height: 0" in css
