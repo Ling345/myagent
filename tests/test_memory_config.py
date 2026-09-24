@@ -140,7 +140,9 @@ def test_cli_memory_turns_flag_overrides_env(monkeypatch, tmp_path, capsys):
 
 
 def test_web_server_respects_configured_session_limit():
-    server = create_server(host="127.0.0.1", port=0, llm_mode="mock", quiet=True, max_sessions=1)
+    server = create_server(
+        host="127.0.0.1", port=0, llm_mode="mock", quiet=True, max_sessions=1, require_auth=False
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -162,7 +164,9 @@ def test_web_server_respects_configured_session_limit():
 
 def test_web_turn_index_survives_memory_trimming(monkeypatch):
     monkeypatch.setenv("AGENT_MEMORY_TURNS", "2")
-    server = create_server(host="127.0.0.1", port=0, llm_mode="mock", quiet=True)
+    server = create_server(
+        host="127.0.0.1", port=0, llm_mode="mock", quiet=True, require_auth=False
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

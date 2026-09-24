@@ -81,7 +81,9 @@ def test_message_without_artifacts_has_no_key(tmp_path):
 
 
 def test_only_coding_agent_gets_code_tools(settings, tmp_path):
-    configured = settings.apply_overrides({"code_root": str(tmp_path / "sandbox")})
+    configured = settings.apply_overrides(
+        {"code_root": str(tmp_path / "sandbox"), "allow_code_tools": True}
+    )
 
     chat_tools = build_tools(mock=False, settings=configured, agent_name="react")
     coding_tools = build_tools(mock=False, settings=configured, agent_name="coding")
@@ -113,6 +115,7 @@ def file_server(tmp_path, monkeypatch):
         llm_mode="mock",
         quiet=True,
         session_dir=str(tmp_path / "sessions"),
+        require_auth=False,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

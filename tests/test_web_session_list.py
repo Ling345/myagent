@@ -185,6 +185,7 @@ def web_base(tmp_path) -> str:
         llm_mode="mock",
         quiet=True,
         session_dir=str(tmp_path / "web-sessions"),
+        require_auth=False,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

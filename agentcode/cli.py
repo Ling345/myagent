@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import sys
 import webbrowser
 from typing import Any, Sequence
@@ -47,6 +49,11 @@ def _add_web_arguments(parser: argparse.ArgumentParser) -> None:
         help="模型模式，默认 openai；mock 仅供离线演示与自动化测试",
     )
     parser.add_argument("--verbose", action="store_true", help="打印访问日志")
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="免登录模式（仅限本机自用；公网必须保留登录）",
+    )
     parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
@@ -76,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--json", action="store_true", help="以 JSON 形式输出结果")
     run_parser.add_argument("--quiet", action="store_true", help="不打印过程日志")
     run_parser.add_argument(
+        "--no-code", action="store_true", help="禁止 coding 智能体执行代码（默认允许）"
+    )
+    run_parser.add_argument(
         "--session",
         default=None,
         help="会话名称；带上它就能跨次运行延续上下文，例如 --session 北京游",
@@ -95,6 +105,26 @@ def build_parser() -> argparse.ArgumentParser:
     open_parser.add_argument(
         "--no-browser", action="store_true", help="只确保服务在运行，不打开浏览器"
     )
+
+    user_parser = subparsers.add_parser("user", help="管理账号（每个用户一个账号与额度）")
+    user_sub = user_parser.add_subparsers(dest="user_command", required=True)
+    add_parser = user_sub.add_parser("add", help="新建账号")
+    add_parser.add_argument("name", help="账号名")
+    add_parser.add_argument("--password", default=None, help="不填则自动生成并打印一次")
+    add_parser.add_argument("--plan", default="free", help="套餐名，默认 free")
+    add_parser.add_argument("--daily-limit", type=int, default=None, help="每日 token 上限")
+    user_sub.add_parser("list", help="列出账号与今日用量")
+    for action in ("disable", "enable"):
+        action_parser = user_sub.add_parser(action, help=f"{action} 账号")
+        action_parser.add_argument("name")
+    limit_parser = user_sub.add_parser("limit", help="调整某个账号的每日额度")
+    limit_parser.add_argument("name")
+    limit_parser.add_argument("tokens", type=int)
+    passwd_parser = user_sub.add_parser("passwd", help="修改账号密码")
+    passwd_parser.add_argument("name")
+    passwd_parser.add_argument("--password", default=None, help="不填则自动生成并打印一次")
+    usage_parser = user_sub.add_parser("usage", help="查看账号最近用量")
+    usage_parser.add_argument("name", nargs="?", help="不填则列出全部账号")
 
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与工具")
     list_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
@@ -159,10 +189,13 @@ def _build_tools(
     settings: Settings,
     create_root: bool = True,
     agent_name: str | None = None,
+    allow_code: bool = True,
 ) -> ToolRegistry:
     """按后端类型与智能体准备工具集。
 
     代码工具只给 coding 智能体，避免别的智能体在工具清单里被"诱导"去跑代码。
+    命令行跑在你自己机器上，默认允许（可用 --no-code 关掉）；网页端由
+    ``AGENT_ALLOW_CODE_TOOLS`` 控制，默认不允许。
     """
     registry = ToolRegistry()
     register_builtin_tools(
@@ -172,6 +205,8 @@ def _build_tools(
         register_demo_tools(registry)
         return registry
     if agent_name is not None and agent_name != "coding":
+        return registry
+    if not allow_code:
         return registry
     register_code_tools(
         registry,
@@ -262,7 +297,12 @@ def _run_command(args: argparse.Namespace) -> int:
     else:
         settings.validate()
         llm = OpenAICompatibleLLM.from_settings(settings)
-        tools = _build_tools(mock=False, settings=settings, agent_name=agent_name)
+        tools = _build_tools(
+            mock=False,
+            settings=settings,
+            agent_name=agent_name,
+            allow_code=not getattr(args, "no_code", False),
+        )
 
     agent = default_registry.create(
         agent_name,
@@ -290,6 +330,76 @@ def _run_command(args: argparse.Namespace) -> int:
     return 0 if result.success else 1
 
 
+def _user_command(args: argparse.Namespace) -> int:
+    """执行 user 子命令：开户、停用、调额度、看用量。"""
+    from agentcode.accounts import AccountStore
+    from agentcode.config import DEFAULT_DB_PATH
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    command = args.user_command
+
+    if command == "add":
+        password = args.password or secrets.token_urlsafe(9)
+        account = store.create(
+            args.name, password, plan=args.plan, daily_token_limit=args.daily_limit
+        )
+        print(
+            f"已创建账号：{account.name}（套餐 {account.plan}，每日 {account.daily_token_limit} token）"
+        )
+        if not args.password:
+            print(f"初始密码：{password}（只显示这一次，请立刻转交给用户）")
+        return 0
+
+    if command == "list":
+        accounts = store.list()
+        if not accounts:
+            print("还没有账号。用 agentcode user add <名字> 创建。")
+            return 0
+        for account in accounts:
+            used, calls = store.usage_today(account.id)
+            state = "启用" if account.is_active else "停用"
+            print(
+                f"{account.name:<16}{account.plan:<8}{state:<4}"
+                f"今日 {used}/{account.daily_token_limit} token，{calls} 次调用"
+            )
+        return 0
+
+    if command in ("disable", "enable"):
+        changed = store.set_active(args.name, command == "enable")
+        print("已更新。" if changed else f"账号「{args.name}」不存在。")
+        return 0 if changed else 1
+
+    if command == "limit":
+        changed = store.set_limit(args.name, args.tokens)
+        print("已更新。" if changed else f"账号「{args.name}」不存在。")
+        return 0 if changed else 1
+
+    if command == "passwd":
+        password = args.password or secrets.token_urlsafe(9)
+        changed = store.set_password(args.name, password)
+        print("已更新密码。" if changed else f"账号「{args.name}」不存在。")
+        if changed and not args.password:
+            print(f"新密码：{password}（只显示这一次）")
+        return 0 if changed else 1
+
+    # usage
+    if args.name:
+        account = store.get(args.name)
+        if account is None:
+            print(f"账号「{args.name}」不存在。")
+            return 1
+        targets = [account]
+    else:
+        targets = store.list()
+
+    for account in targets:
+        used, calls = store.usage_today(account.id)
+        print(f"== {account.name}（今日 {used}/{account.daily_token_limit} token，{calls} 次）")
+        for row in store.usage_history(account.id, limit=7):
+            print(f"   {row['day']}  {row['tokens']} token / {row['calls']} 次")
+    return 0
+
+
 def _web_command(args: argparse.Namespace) -> int:
     """执行 web 子命令：启动本地可视化页面。"""
     from agentcode.web.server import serve
@@ -305,6 +415,7 @@ def _web_command(args: argparse.Namespace) -> int:
         quiet=not args.verbose,
         max_sessions=settings.max_sessions,
         session_dir=settings.web_session_dir,
+        require_auth=not getattr(args, "no_auth", False),
     )
     return 0
 
@@ -333,6 +444,7 @@ def _open_command(args: argparse.Namespace) -> int:
         quiet=not args.verbose,
         max_sessions=settings.max_sessions,
         session_dir=settings.web_session_dir,
+        require_auth=not getattr(args, "no_auth", False),
     )
     return 0
 
@@ -366,6 +478,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "open":
             return _open_command(args)
+
+        if args.command == "user":
+            return _user_command(args)
 
         return _run_command(args)
     except ConfigError as exc:

@@ -193,7 +193,9 @@ def test_cli_run_with_session_persists_history(tmp_path, capsys):
 
 @pytest.fixture
 def web_base() -> str:
-    server = create_server(host="127.0.0.1", port=0, llm_mode="mock", quiet=True)
+    server = create_server(
+        host="127.0.0.1", port=0, llm_mode="mock", quiet=True, require_auth=False
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

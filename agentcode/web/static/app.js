@@ -16,10 +16,22 @@ const els = {
   agentList: document.getElementById("agent-list"),
   newSessionButton: document.getElementById("new-session-button"),
   chatSub: document.getElementById("chat-sub"),
+  app: document.querySelector(".app"),
+  login: document.getElementById("login"),
+  loginForm: document.getElementById("login-form"),
+  loginName: document.getElementById("login-name"),
+  loginPassword: document.getElementById("login-password"),
+  loginButton: document.getElementById("login-button"),
+  loginError: document.getElementById("login-error"),
+  account: document.getElementById("account"),
+  accountName: document.getElementById("account-name"),
+  accountQuota: document.getElementById("account-quota"),
+  logoutButton: document.getElementById("logout-button"),
 };
 
 const state = {
   config: null,
+  account: null,
   sessions: [],
   currentSessionId: null,
   running: false,
@@ -54,6 +66,108 @@ async function postJSON(path, payload) {
   });
   if (!response.ok) throw new Error(`服务返回了 ${response.status}`);
   return response.json();
+}
+
+/* ------------------------------------------------------------ 登录与账号 */
+
+function formatTokens(value) {
+  const number = Number(value || 0);
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}k`;
+  return String(number);
+}
+
+async function fetchAccount() {
+  try {
+    const response = await fetch("/api/me");
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return payload.account || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function renderAccount(account) {
+  state.account = account;
+  if (!account) {
+    els.account.hidden = true;
+    return;
+  }
+  els.account.hidden = false;
+  els.accountName.textContent = account.name;
+  els.accountQuota.textContent = `今日 ${formatTokens(account.used_today)}/${formatTokens(
+    account.daily_token_limit
+  )}`;
+  els.accountQuota.title = `今日已用 ${account.used_today} token，共 ${account.calls_today} 次调用`;
+}
+
+function showLogin(message = "") {
+  els.app.hidden = true;
+  els.login.hidden = false;
+  els.loginError.textContent = message;
+  els.loginPassword.value = "";
+  els.loginName.focus();
+}
+
+function showApp() {
+  els.login.hidden = true;
+  els.app.hidden = false;
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  const name = els.loginName.value.trim();
+  const password = els.loginPassword.value;
+  if (!name || !password) {
+    els.loginError.textContent = "请填写账号和密码。";
+    return;
+  }
+  els.loginButton.disabled = true;
+  els.loginError.textContent = "正在登录…";
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, password }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      els.loginError.textContent = payload.error || "登录失败。";
+      return;
+    }
+    els.loginError.textContent = "";
+    showApp();
+    renderAccount(payload.account);
+    await loadMeta();
+    await bootSession();
+  } catch (error) {
+    els.loginError.textContent = `无法连接服务：${error.message}`;
+  } finally {
+    els.loginButton.disabled = false;
+  }
+}
+
+async function logout() {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch (error) {
+    // 网络失败也把界面退回登录页
+  }
+  state.account = null;
+  state.currentSessionId = null;
+  state.sessions = [];
+  renderAccount(null);
+  showLogin("已退出登录。");
+}
+
+async function refreshAccount() {
+  const account = await fetchAccount();
+  if (!account) {
+    showLogin("登录已过期，请重新登录。");
+    return null;
+  }
+  renderAccount(account);
+  return account;
 }
 
 /* ------------------------------------------------------------ 会话标识 */
@@ -491,6 +605,7 @@ async function submitRun(event) {
   } finally {
     stopProgressTimer();
     setRunning(false);
+    refreshAccount();
     els.task.focus();
   }
 }
@@ -640,8 +755,18 @@ els.messages.addEventListener("scroll", () => {
 });
 
 async function boot() {
+  const account = await fetchAccount();
+  if (!account) {
+    showLogin();
+    return;
+  }
+  showApp();
+  renderAccount(account);
   await loadMeta();
   await bootSession();
 }
+
+els.loginForm.addEventListener("submit", submitLogin);
+els.logoutButton.addEventListener("click", logout);
 
 boot();

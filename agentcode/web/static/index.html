@@ -8,6 +8,26 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
+    <div class="login" id="login" hidden>
+      <form class="login-card" id="login-form">
+        <h2>登录 AgentCode</h2>
+        <p class="login-hint">用管理员分配给你的账号登录。没有账号时，请管理员执行
+          <code>agentcode user add 你的名字</code>。</p>
+        <label for="login-name">账号</label>
+        <input id="login-name" name="name" autocomplete="username" required />
+        <label for="login-password">密码</label>
+        <input
+          id="login-password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <button type="submit" class="primary" id="login-button">登录</button>
+        <p class="login-error" id="login-error" role="alert"></p>
+      </form>
+    </div>
+
     <div class="flow" aria-hidden="true">
       <span class="blob blob-a"></span>
       <span class="blob blob-b"></span>
@@ -23,6 +43,12 @@
 
         <p class="sidebar-label">智能体</p>
         <div id="agent-list" class="agent-list"></div>
+
+        <div class="account" id="account" hidden>
+          <span class="account-name" id="account-name"></span>
+          <span class="account-quota" id="account-quota"></span>
+          <button type="button" id="logout-button" class="link">退出</button>
+        </div>
       </aside>
 
       <main class="chat">

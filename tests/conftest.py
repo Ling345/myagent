@@ -24,6 +24,8 @@ def _isolated_session_dir(monkeypatch, tmp_path_factory):
     target = tmp_path_factory.mktemp("web-sessions")
     monkeypatch.setattr(web_sessions, "default_session_dir", lambda: str(target))
     monkeypatch.setattr(web_server, "default_session_dir", lambda: str(target))
+    # 账号库也要隔离，别把用户表写进仓库
+    monkeypatch.setenv("AGENT_DB_PATH", str(tmp_path_factory.mktemp("db") / "accounts.db"))
     yield
 
 

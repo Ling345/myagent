@@ -6,7 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import socket
+import threading
+import time
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,8 +19,15 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
-from agentcode.config import DEFAULT_MAX_SESSIONS, Settings
+from agentcode.accounts import Account, AccountStore
+from agentcode.config import (
+    DEFAULT_MAX_SESSIONS,
+    DEFAULT_DAILY_TOKEN_LIMIT,
+    DEFAULT_DB_PATH,
+    Settings,
+)
 from agentcode.core.registry import default_registry
+from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
 from agentcode.tools import (
     ToolRegistry,
     register_builtin_tools,
@@ -29,6 +41,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 64 * 1024
 #: 单个文件的内容最多返回这么多字符（够看代码，又不至于撑爆前端）
 MAX_FILE_CHARS = 20000
+#: 不需要登录也能访问的路径（登录页本身是静态资源）
+PUBLIC_PATHS = {"/healthz", "/api/login", "/api/me", "/api/logout"}
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
@@ -115,6 +129,58 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if not getattr(self.server, "quiet", True):
             super().log_message(format, *args)
 
+    def _begin_request(self) -> None:
+        """记录请求起点与请求 id，供结构化日志使用。"""
+        self._started = time.perf_counter()
+        self._request_id = uuid.uuid4().hex[:8]
+        self._account = self._current_account()
+
+    def _current_account(self) -> Account | None:
+        """从签名 cookie 解析当前账号。"""
+        token = read_cookie(self.headers.get("Cookie"))
+        if not token:
+            return None
+        account_id = read_token(token, self.server.secret_key)  # type: ignore[attr-defined]
+        if not account_id:
+            return None
+        account = self.server.accounts.get_by_id(account_id)  # type: ignore[attr-defined]
+        return account if account and account.is_active else None
+
+    def _log_access(self, status: int) -> None:
+        """输出一行 JSON 访问日志：请求 id、用户、路径、状态、耗时。"""
+        if not getattr(self.server, "access_log", False):
+            return
+        account = getattr(self, "_account", None)
+        payload = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "request_id": getattr(self, "_request_id", "-"),
+            "method": self.command or "-",
+            "path": self.path.split("?", 1)[0],
+            "status": status,
+            "ms": round((time.perf_counter() - getattr(self, "_started", time.perf_counter())) * 1000, 1),
+            "user": account.name if account else "",
+            "ip": self.client_address[0] if self.client_address else "",
+        }
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+    def _store(self) -> SessionStore:
+        """取当前用户的会话仓库——每个用户一个独立目录，天然隔离。"""
+        if not getattr(self.server, "require_auth", True):
+            return self.server.sessions  # type: ignore[attr-defined]
+        account = getattr(self, "_account", None)
+        if account is None:
+            raise PermissionError("未登录")
+        return self.server.store_for(account.id)  # type: ignore[attr-defined]
+
+    def _auth_ok(self) -> bool:
+        """需要登录的接口统一在这里拦：未登录直接回 401 并返回 False。"""
+        if not getattr(self.server, "require_auth", True):
+            return True  # 免登录模式（本地自用）
+        if getattr(self, "_account", None) is not None:
+            return True
+        self._send_json({"error": "请先登录。"}, status=401)
+        return False
+
     def _settings(self) -> Settings:
         """每次请求都重新读取环境，保证改完 .env 刷新页面即可生效。"""
         return Settings.from_env(env_file=getattr(self.server, "env_file", None))
@@ -128,6 +194,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if body:
             self.wfile.write(body)
+        self._log_access(status)
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -169,12 +236,32 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
     # ----------------------------------------------------------------- 路由
 
     def do_GET(self) -> None:  # noqa: N802 - 父类约定的方法名
+        self._begin_request()
         path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            self._send_json(
+                {
+                    "status": "ok",
+                    "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "accounts": len(self.server.accounts.list()),  # type: ignore[attr-defined]
+                }
+            )
+            return
         if path in ("/", "/index.html"):
             self._serve_static("index.html")
             return
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
+            return
+        if path == "/api/me":
+            account = getattr(self, "_account", None)
+            if account is None:
+                self._send_json({"error": "未登录。"}, status=401)
+                return
+            self._send_json({"account": self._account_payload(account)})
+            return
+        # 其余接口都需要登录
+        if path.startswith("/api/") and not self._auth_ok():
             return
         if path == "/api/agents":
             self._send_json(agents_payload(self._settings()))
@@ -183,11 +270,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json(config_payload(self._settings()))
             return
         if path == "/api/sessions":
-            store: SessionStore = self.server.sessions  # type: ignore[attr-defined]
-            self._send_json({"sessions": store.list()})
+            self._send_json({"sessions": self._store().list()})
             return
         if path == "/api/session":
-            store = self.server.sessions  # type: ignore[attr-defined]
+            store = self._store()
             query = parse_qs(urlsplit(self.path).query)
             session_id = (query.get("id") or [""])[0]
             record = store.record(session_id) if session_id else None
@@ -204,6 +290,18 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._serve_code_file()
             return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
+
+    def _account_payload(self, account: Account) -> dict[str, Any]:
+        """给前端的账号信息：名字、套餐、今日额度。"""
+        used, calls = self.server.accounts.usage_today(account.id)  # type: ignore[attr-defined]
+        return {
+            "name": account.name,
+            "plan": account.plan,
+            "daily_token_limit": account.daily_token_limit,
+            "used_today": used,
+            "calls_today": calls,
+            "remaining": max(0, account.daily_token_limit - used),
+        }
 
     def _serve_code_file(self) -> None:
         """读取代码工作目录里的文本文件，供页面点击查看。"""
@@ -242,8 +340,11 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - 父类约定的方法名
         from agentcode.web.runner import run_stream  # 延迟导入，避免循环依赖
 
+        self._begin_request()
         path = self.path.split("?", 1)[0]
         if path not in (
+            "/api/login",
+            "/api/logout",
             "/api/run",
             "/api/session/reset",
             "/api/sessions/create",
@@ -253,11 +354,35 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
             return
 
+        if path == "/api/login":
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._handle_login(payload)
+            return
+
+        if path == "/api/logout":
+            # 登出不需要请求体：必须在读 body 之前处理，否则空 body 会被判 400
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Set-Cookie", clear_cookie())
+            body = json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self._log_access(200)
+            return
+
         payload = self._read_json()
         if payload is None:
             return
 
-        session_store: SessionStore = self.server.sessions  # type: ignore[attr-defined]
+        if not self._auth_ok():
+            return
+        account = getattr(self, "_account", None)
+
+        session_store: SessionStore = self._store()
         raw_session = str(payload.get("session_id") or "").strip()
         session_id = raw_session or None
 
@@ -304,6 +429,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         )
 
         settings = self._settings()
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        if account is not None:
+            allowed, reason = accounts.check_quota(account)
+            if not allowed:
+                self._send_json({"error": reason}, status=402)
+                return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -327,9 +459,40 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 )
                 self.wfile.write(chunk.encode("utf-8"))
                 self.wfile.flush()
+                if event["type"] == "answer" and account is not None:
+                    usage = (event["data"] or {}).get("usage") or {}
+                    accounts.record_usage(
+                        account.id, int(usage.get("total_tokens") or 0), calls=1
+                    )
         except (BrokenPipeError, ConnectionResetError):
             # 浏览器提前关闭连接（例如用户刷新页面）时静默结束
             pass
+
+    def _handle_login(self, payload: dict[str, Any]) -> None:
+        """校验账号密码并下发签名 cookie。"""
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        name = str(payload.get("name") or "").strip()
+        password = str(payload.get("password") or "")
+        account = accounts.verify(name, password)
+        if account is None:
+            # 不区分"账号不存在"与"密码错误"，避免账号枚举
+            self._send_json({"error": "账号或密码不正确。"}, status=401)
+            return
+
+        token = create_token(account.id, self.server.secret_key)  # type: ignore[attr-defined]
+        body = json.dumps(
+            {"account": self._account_payload(account)}, ensure_ascii=False
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie", build_cookie(token))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self._account = account
+        self._log_access(200)
 
 
 def create_server(
@@ -341,16 +504,47 @@ def create_server(
     quiet: bool = True,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
     session_dir: str | None = None,
+    accounts: AccountStore | None = None,
+    secret_key: str | None = None,
+    require_auth: bool = True,
+    access_log: bool = False,
 ) -> ThreadingHTTPServer:
-    """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。"""
+    """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。
+
+    ``require_auth=False`` 表示免登录（本地自用/自动化测试）；
+    面向公网时必须保持默认的 ``True``。
+    """
     server = ThreadingHTTPServer((host, port), AgentCodeRequestHandler)
     server.daemon_threads = True
     server.llm_mode = llm_mode  # type: ignore[attr-defined]
     server.env_file = env_file  # type: ignore[attr-defined]
     server.quiet = quiet  # type: ignore[attr-defined]
-    server.sessions = SessionStore(  # type: ignore[attr-defined]
-        directory=session_dir or default_session_dir(), max_sessions=max_sessions
+    server.require_auth = require_auth  # type: ignore[attr-defined]
+    server.access_log = access_log  # type: ignore[attr-defined]
+    base_dir = Path(session_dir or default_session_dir())
+    server.session_base_dir = base_dir  # type: ignore[attr-defined]
+    server.max_sessions = max_sessions  # type: ignore[attr-defined]
+    # 免登录模式下的共享仓库（也用于把老接口跑通）
+    server.sessions = SessionStore(directory=base_dir, max_sessions=max_sessions)  # type: ignore[attr-defined]
+    server.accounts = accounts or AccountStore(  # type: ignore[attr-defined]
+        os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH
     )
+    server.secret_key = secret_key or os.environ.get("AGENT_SECRET_KEY") or uuid.uuid4().hex
+    server.store_lock = threading.Lock()  # type: ignore[attr-defined]
+    server.user_stores = {}  # type: ignore[attr-defined]
+
+    def store_for(account_id: str) -> SessionStore:
+        """每个用户一个独立目录的会话仓库（懒加载 + 缓存）。"""
+        with server.store_lock:  # type: ignore[attr-defined]
+            store = server.user_stores.get(account_id)  # type: ignore[attr-defined]
+            if store is None:
+                store = SessionStore(
+                    directory=base_dir / account_id, max_sessions=max_sessions
+                )
+                server.user_stores[account_id] = store  # type: ignore[attr-defined]
+            return store
+
+    server.store_for = store_for  # type: ignore[attr-defined]
     return server
 
 
@@ -364,8 +558,17 @@ def serve(
     quiet: bool = True,
     max_sessions: int = DEFAULT_MAX_SESSIONS,
     session_dir: str | None = None,
+    require_auth: bool = True,
+    access_log: bool = True,
 ) -> None:
     """启动网页服务并阻塞，直到用户按 Ctrl+C。"""
+    accounts = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    boot_password: str | None = None
+    if require_auth and not accounts.list():
+        # 第一次启动时自动建一个管理员账号，只在这里打印一次密码（类似 Jupyter 的 token）
+        boot_password = secrets.token_urlsafe(9)
+        accounts.create("admin", boot_password, plan="owner")
+
     try:
         server = create_server(
             host,
@@ -375,6 +578,9 @@ def serve(
             quiet=quiet,
             max_sessions=max_sessions,
             session_dir=session_dir,
+            accounts=accounts,
+            require_auth=require_auth,
+            access_log=access_log,
         )
     except OSError as exc:
         print(f"启动失败：{host}:{port} 无法监听（{exc}）。")
@@ -384,7 +590,15 @@ def serve(
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上不显示模式，一切走这个设置）")
-    print("同一个页面标签页会自动延续上下文记忆，想重新开始就点页面上的「新会话」。")
+    if require_auth:
+        if boot_password:
+            print("=" * 56)
+            print(f"已创建初始账号　用户名：admin　密码：{boot_password}")
+            print("请立刻记下这个密码，它只显示这一次。")
+            print("=" * 56)
+        print("登录后才能使用；需要给他人开账号：agentcode user add <名字>")
+    else:
+        print("⚠ 免登录模式：任何能访问这个端口的人都能用你的模型额度，仅限本机自用。")
     print("这个窗口就是服务本身：关闭窗口或按 Ctrl+C 即可停止。")
     if open_browser:
         webbrowser.open(url)

@@ -114,6 +114,9 @@ def build_tools(
         return registry
 
     active = settings or Settings.from_env()
+    if not active.allow_code_tools:
+        # 面向公网默认不允许执行代码：容器化隔离之前，这是最稳的默认值
+        return registry
     register_code_tools(
         registry,
         root=active.code_root,

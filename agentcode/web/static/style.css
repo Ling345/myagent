@@ -25,6 +25,12 @@
   box-sizing: border-box;
 }
 
+/* hidden 属性必须真的隐藏：否则 .login{display:flex} 之类会盖过它的默认 display:none，
+   登录框会一直蒙在应用上面（真实 bug：登录后界面被遮住） */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -46,6 +52,82 @@ body {
 }
 
 /* ------------------------------------------------------- 流动的浅蓝背景 */
+
+.login {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: linear-gradient(180deg, var(--bg-base) 0%, var(--bg-deep) 100%);
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(360px, 100%);
+  padding: 28px 26px 24px;
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 20px 50px rgba(19, 24, 32, 0.08);
+}
+
+.login-card h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.login-hint {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.login-hint code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+}
+
+.login-card label {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.login-card input {
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.login-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.login-card .primary {
+  margin-top: 16px;
+  border-radius: 10px;
+}
+
+.login-error {
+  min-height: 18px;
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
 
 .flow {
   position: fixed;
@@ -335,6 +417,39 @@ body {
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+
+.account {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.account-name {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.account-quota {
+  flex: 1;
+  text-align: right;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--accent);
 }
 
 button:disabled {

@@ -3,6 +3,9 @@
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
 新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，只给结果，但记住你们的对话。
 
+> 已按「能收费的产品」完成阶段一：**账号体系 + 每用户会话隔离 + 每日 token 配额 + 默认关闭代码执行**。
+> 详见下面「账号与配额」一节。
+
 内置四种智能体：
 
 - **ReAct**：思考 → 行动 → 观察，边推理边调用工具，适合需要实时信息的任务。
@@ -145,6 +148,41 @@ D:\Anaconda\python.exe -m agentcode run --task "我最喜欢的城市是哪个�
 ```
 
 ## 网站入口与网页
+
+### 账号与配额
+
+网页端默认**必须登录**。第一次启动如果账号库是空的，会自动创建一个管理员账号并把密码**只打印一次**：
+
+```
+========================================================
+已创建初始账号　用户名：admin　密码：xxxxxxxxxxx
+请立刻记下这个密码，它只显示这一次。
+========================================================
+```
+
+账号管理走命令行（邀请制，避免公网被刷注册）：
+
+```powershell
+D:\Anaconda\python.exe -m agentcode user add alice           # 开户，密码自动生成并打印一次
+D:\Anaconda\python.exe -m agentcode user add bob --password 自定义 --plan pro --daily-limit 200000
+D:\Anaconda\python.exe -m agentcode user list                # 账号 + 今日用量
+D:\Anaconda\python.exe -m agentcode user usage alice         # 最近 7 天用量
+D:\Anaconda\python.exe -m agentcode user limit alice 500000  # 卖套餐时调额度
+D:\Anaconda\python.exe -m agentcode user passwd alice         # 改密码
+D:\Anaconda\python.exe -m agentcode user disable bob         # 停用（欠费/违规）
+```
+
+| 能力 | 实现 |
+| --- | --- |
+| 身份 | SQLite 账号表（`AGENT_DB_PATH`），PBKDF2-SHA256 加盐哈希，不存明文 |
+| 登录态 | HMAC 签名 HttpOnly Cookie（`AGENT_SECRET_KEY`），改一个字符即失效，7 天过期 |
+| 会话隔离 | 每个账号独立目录 `traces/web-sessions/<账号id>/`，看不到也猜不到别人的会话 |
+| 配额 | 按（账号, 日期）累计 token，超额返回 402 并说明原因，次日自动重置 |
+| 运维 | `/healthz` 免登录探活；每请求一行 JSON 日志（请求 id、用户、路径、状态、耗时） |
+
+> 公网部署务必固定 `AGENT_SECRET_KEY`（否则每次重启都要求重新登录），
+> 并保持 `AGENT_ALLOW_CODE_TOOLS=false`——没有容器隔离时，网页端执行代码是危险的。
+> 本地自用想免登录：`agentcode web --no-auth`（会打印醒目警告）。
 
 三种打开方式，效果一样：
 
@@ -317,7 +355,7 @@ def add(a: str, b: str) -> str:
 D:\Anaconda\python.exe -m pytest -q
 ```
 
-235 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度。覆盖重点：
+264 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度。覆盖重点：
 
 - 代码执行：stdout/stderr 回传、超时终止、**子进程看不到密钥**、输出截断、路径逃逸被拒；
 - coding 闭环：scripted 模型驱动「初版写错 → 测试失败 → 读报错 → 改对 → 全绿」；
@@ -327,6 +365,8 @@ D:\Anaconda\python.exe -m pytest -q
 - 运行产物：快照对比能认出新增/改动文件、产物随消息落盘、`/api/file` 只能在代码目录内读取；
 - 联网搜索：密钥从配置注入（不依赖环境变量）、优先取直接答案、有机结果带来源链接、
   密钥无效/额度用完/一般错误各有对应提示；
+- 账号与配额：密码哈希校验、重复账号/停用/改密、登录态签名与防篡改、未登录一律 401、
+  **两个用户互相看不到对方的会话**、额度耗尽返回 402、跑完把用量记到账号名下；
 - 上下文记忆：第二轮提示词能读到第一轮答案、超限裁剪、真实轮次不回退、会话隔离与磁盘会话；
 - 多会话：保留旧会话、按首条提问自动命名、手动改名不被覆盖、切回旧会话能还原记录与记忆、删除、落盘后重开仍在；
 - 网页：真实 HTTP + SSE 端到端、视觉规范（流动背景 / 半透明面板 / 品牌蓝）、页面不出现推理过程与离线选项。

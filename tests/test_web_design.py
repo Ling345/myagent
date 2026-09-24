@@ -79,3 +79,11 @@ def test_message_area_is_height_constrained():
     css = _css()
     assert "grid-template-rows: 100vh" in css
     assert "min-height: 0" in css
+
+
+def test_hidden_attribute_always_hides():
+    """回归：.login{display:flex} 曾盖过 hidden 的默认 display:none，
+    登录框一直蒙在应用上面（点任何按钮都被它拦截）。"""
+    css = _css()
+    assert "[hidden]" in css
+    assert "display: none !important" in css

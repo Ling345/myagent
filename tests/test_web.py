@@ -18,7 +18,9 @@ from agentcode.web.server import create_server, is_port_open
 @pytest.fixture
 def web_base() -> str:
     """在随机端口启动一个只服务本机的网页服务。"""
-    server = create_server(host="127.0.0.1", port=0, llm_mode="mock", quiet=True)
+    server = create_server(
+        host="127.0.0.1", port=0, llm_mode="mock", quiet=True, require_auth=False
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

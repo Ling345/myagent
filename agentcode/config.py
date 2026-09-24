@@ -38,6 +38,12 @@ DEFAULT_CODE_OUTPUT_LIMIT = 4000
 #: 写代码需要比闲聊更多的步数（须与 agents.coding 的默认值一致）
 DEFAULT_CODING_STEPS = 20
 
+#: 账号与配额（收费产品的地基）
+DEFAULT_DB_PATH = "traces/agentcode.db"
+DEFAULT_DAILY_TOKEN_LIMIT = 50_000
+#: 面向公网时默认不允许执行代码；本地 CLI 使用不受影响
+DEFAULT_ALLOW_CODE_TOOLS = False
+
 
 def mask_secret(value: str | None) -> str:
     """对密钥做脱敏展示：保留首尾各 4 位。"""
@@ -106,6 +112,10 @@ class Settings:
     code_timeout: float = DEFAULT_CODE_TIMEOUT
     code_output_limit: int = DEFAULT_CODE_OUTPUT_LIMIT
     coding_steps: int = DEFAULT_CODING_STEPS
+    db_path: str = DEFAULT_DB_PATH
+    secret_key: str | None = None
+    daily_token_limit: int = DEFAULT_DAILY_TOKEN_LIMIT
+    allow_code_tools: bool = DEFAULT_ALLOW_CODE_TOOLS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -156,6 +166,10 @@ class Settings:
             code_timeout=_to_float(pick("AGENT_CODE_TIMEOUT"), DEFAULT_CODE_TIMEOUT),
             code_output_limit=_to_int(pick("AGENT_CODE_OUTPUT_LIMIT"), DEFAULT_CODE_OUTPUT_LIMIT),
             coding_steps=_to_int(pick("AGENT_CODING_STEPS"), DEFAULT_CODING_STEPS),
+            db_path=str(pick("AGENT_DB_PATH", DEFAULT_DB_PATH)),
+            secret_key=pick("AGENT_SECRET_KEY"),
+            daily_token_limit=_to_int(pick("AGENT_DAILY_TOKEN_LIMIT"), DEFAULT_DAILY_TOKEN_LIMIT),
+            allow_code_tools=_to_bool(pick("AGENT_ALLOW_CODE_TOOLS"), DEFAULT_ALLOW_CODE_TOOLS),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -201,6 +215,7 @@ class Settings:
             "AGENT_CODE_TIMEOUT": self.code_timeout,
             "AGENT_CODE_OUTPUT_LIMIT": self.code_output_limit,
             "AGENT_CODING_STEPS": self.coding_steps,
+            "AGENT_DAILY_TOKEN_LIMIT": self.daily_token_limit,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -224,6 +239,10 @@ class Settings:
             "LLM_TEMPERATURE": str(self.temperature),
             "AGENT_MAX_STEPS": str(self.max_steps),
             "AGENT_CODING_STEPS": str(self.coding_steps),
+            "AGENT_DAILY_TOKEN_LIMIT": str(self.daily_token_limit),
+            "AGENT_ALLOW_CODE_TOOLS": "是" if self.allow_code_tools else "否",
+            "AGENT_SECRET_KEY": mask_secret(self.secret_key),
+            "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
             "AGENT_MAX_SESSIONS": str(self.max_sessions),
             "AGENT_WEB_SESSION_DIR": self.web_session_dir,
