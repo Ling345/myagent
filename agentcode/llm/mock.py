@@ -98,5 +98,27 @@ def demo_responses_llm(agent: str = "react") -> ScriptedLLM:
         "echo": [
             "Thought: 回显任务内容。\nAction: Finish[已收到任务]",
         ],
+        # 演示「测试生成智能体」：配套 examples/sample_code/calculator.py 使用
+        "test_gen": [
+            'Thought: 先读清楚被测文件。\nAction: read_file[path="calculator.py"]',
+            "Thought: 写一份 pytest 测试，覆盖正常路径与边界。\n"
+            'Action: write_file[path="test_calculator.py", content="import pytest\\n\\n'
+            "from calculator import add, average, divide, safe_sqrt, subtract\\n\\n\\n"
+            "def test_add_positive_numbers():\\n    assert add(1, 2) == 3\\n\\n\\n"
+            "def test_subtract_can_be_negative():\\n    assert subtract(1, 5) == -4\\n\\n\\n"
+            "def test_divide_normal():\\n    assert divide(9, 3) == 3\\n\\n\\n"
+            "def test_divide_by_zero_raises():\\n"
+            "    with pytest.raises(ValueError):\\n        divide(1, 0)\\n\\n\\n"
+            "def test_average_normal():\\n    assert average([1, 2, 3]) == 2\\n\\n\\n"
+            "def test_average_empty_raises():\\n"
+            "    with pytest.raises(ValueError):\\n        average([])\\n\\n\\n"
+            "def test_safe_sqrt_positive():\\n    assert safe_sqrt(9) == 3\\n\\n\\n"
+            "def test_safe_sqrt_negative_returns_none():\\n    assert safe_sqrt(-1) is None\\n\"]",
+            "Thought: 跑一遍，确认真的能过。\n"
+            "Action: run_python[code=\"import pytest, sys; sys.exit(pytest.main(['-q', 'test_calculator.py']))\"]",
+            "Thought: 全绿了，收尾。\n"
+            "Action: Finish[已为 calculator.py 生成 8 个 pytest 用例，覆盖加/减/除法、平均值、"
+            "开发平方根的正常路径与边界（除零、空列表、负数返回 None）；测试文件：test_calculator.py。]",
+        ],
     }
     return ScriptedLLM(scripts.get(agent, scripts["react"]))

@@ -36,6 +36,8 @@ from agentcode.web.sessions import SessionStore
 
 Event = dict[str, Any]
 Emitter = Callable[[Event], None]
+#: 需要代码工具的智能体（读源码、写测试、跑测试）
+CODE_TOOL_AGENTS = frozenset({"coding", "test_gen"})
 
 
 def snapshot_files(root: str | Path) -> dict[str, tuple[float, int]]:
@@ -100,22 +102,16 @@ def build_tools(
     代码工具只给 coding 智能体：别的智能体用不上，挂在工具清单里既占提示词、
     又会诱导模型去做多余的代码执行（多一轮就多几秒）。
     """
+    active = settings or Settings.from_env()
     registry = ToolRegistry()
-    register_builtin_tools(
-        registry,
-        include_search=not mock,
-        serpapi_key=(settings or Settings.from_env()).serpapi_key,
-    )
+    register_builtin_tools(registry, include_search=not mock, serpapi_key=active.serpapi_key)
     if mock:
         register_demo_tools(registry)
-        return registry
-
-    if agent_name is not None and agent_name != "coding":
-        return registry
-
-    active = settings or Settings.from_env()
-    if not active.allow_code_tools:
+    elif not active.allow_code_tools:
         # 面向公网默认不允许执行代码：容器化隔离之前，这是最稳的默认值
+        return registry
+
+    if agent_name is not None and agent_name not in CODE_TOOL_AGENTS:
         return registry
     register_code_tools(
         registry,

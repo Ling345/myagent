@@ -1,5 +1,9 @@
 # AgentCode：可扩展的 Python 智能体框架
 
+> **软件工程 · Homework 1（Code Agent）**：本项目的作业方向是**测试生成 Agent**——
+> 为指定源码生成 pytest 用例，并**真的跑通**（生成 → 运行 → 读报错 → 修正 → 全绿）。
+> 设计说明与评分点对照见 [Design.md](Design.md)。
+
 一个把「智能体范式」做成可插拔组件的教学向框架：LLM 后端、工具、记忆、中间件都能替换，
 新增一个智能体只需要**一个文件**加一个注册装饰器；附带一个本地网页，只给结果，但记住你们的对话。
 
@@ -37,6 +41,21 @@ D:\Anaconda\python.exe -m agentcode config
 ```
 
 ## 代码能力
+
+### 测试生成（本次作业方向）
+
+```powershell
+# 真实模型：为指定源码生成 pytest 用例，生成后真的跑一遍，不通过就改到通过
+D:\Anaconda\python.exe -m agentcode run --agent test_gen --file examples\sample_code\calculator.py
+
+# 离线演示（不消耗额度，内置脚本模型，配套上面那个示例文件）
+D:\Anaconda\python.exe -m agentcode run --agent test_gen --llm mock --file examples\sample_code\calculator.py
+```
+
+`test_gen` 有五条纪律写进提示词并有测试守着：先读源码再写测试、**不修改被测源文件**、
+只跑自己写的测试文件、必须覆盖边界（空输入/零/负数/非法类型/`pytest.raises`）、
+结论只说"为哪个文件生成了测试、覆盖了什么、测试文件叫什么"。
+实测：为 `calculator.py` 生成 8 个用例，独立复跑 `pytest -q test_calculator.py` 全部通过。
 
 `coding` 智能体带四个工具：`run_python`、`read_file`、`write_file`、`list_files`。
 它的终止条件不是"我觉得写对了"，而是"测试真的跑绿了"——与 `reflection` 的区别在于反馈来自

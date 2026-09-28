@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import sys
 import webbrowser
+from pathlib import Path
 from typing import Any, Sequence
 
 from agentcode import agents  # noqa: F401  导入即触发内置智能体注册
@@ -69,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="运行一个智能体")
     run_parser.add_argument("--agent", default=None, help="智能体名称，默认 react 或配置文件中的写法")
     run_parser.add_argument("--task", default=None, help="任务描述，未提供时进入交互式输入")
+    run_parser.add_argument(
+        "--file",
+        default=None,
+        help="被测源码文件：复制到代码工作目录，并作为测试生成任务的输入",
+    )
     run_parser.add_argument(
         "--llm",
         choices=["openai", "mock"],
@@ -203,10 +210,7 @@ def _build_tools(
     )
     if mock:
         register_demo_tools(registry)
-        return registry
-    if agent_name is not None and agent_name != "coding":
-        return registry
-    if not allow_code:
+    if not allow_code or agent_name not in {"coding", "test_gen"}:
         return registry
     register_code_tools(
         registry,
@@ -275,6 +279,21 @@ def _run_command(args: argparse.Namespace) -> int:
     settings = _load_settings(args)
     agent_name = args.agent or settings.extra.get("agent") or "react"
     task = args.task or _prompt_for_task()
+
+    # --file：把被测源码复制到代码工作目录，并据此组织任务描述
+    source_file = getattr(args, "file", None)
+    if source_file:
+        source = Path(source_file)
+        if not source.is_file():
+            print(f"错误：找不到文件 {source_file}")
+            return 2
+        workspace = Path(settings.code_root)
+        workspace.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, workspace / source.name)
+        print(f"已把被测文件复制到工作目录：{workspace / source.name}")
+        extra = f"\n补充要求：{task}" if task else ""
+        task = f"为 {source.name} 生成 pytest 测试用例，覆盖正常路径与边界情况。{extra}"
+
     if not task:
         print("错误：任务不能为空，请通过 --task 或交互式输入提供。")
         return 2

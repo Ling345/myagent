@@ -9,6 +9,7 @@ from agentcode.agents.echo import EchoAgent
 from agentcode.agents.plan_and_solve import Executor, PlanAndSolveAgent, Planner
 from agentcode.agents.react import ReActAgent
 from agentcode.agents.reflection import ReflectionAgent
+from agentcode.agents.test_gen import TestGenerationAgent
 
 __all__ = [
     "CodingAgent",
@@ -18,4 +19,5 @@ __all__ = [
     "Planner",
     "ReActAgent",
     "ReflectionAgent",
+    "TestGenerationAgent",
 ]
