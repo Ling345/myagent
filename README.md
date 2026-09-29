@@ -142,20 +142,54 @@ coding 智能体的答案**不提测试、用例、通过与否、命令或 stdo
 关键设计：**选了 docker 但环境不可用时直接报错，绝不悄悄退回本机执行**——
 "以为隔离了其实没隔离"比不隔离更危险，这条有回归测试守着（`tests/test_sandbox.py`）。
 
+#### 为什么需要一个专用沙箱镜像
+
+官方的 `python:3.13-slim` 里**没有 pytest**，而容器运行期是断网的，装不了包。
+所以测试依赖必须在**构建期**烤进镜像：
+
 ```powershell
-# 1. 装好并启动 Docker（Windows 上装 Docker Desktop 即可）
-docker info --format "{{.ServerVersion}}"
-# 2. 拉好基础镜像（只需一次）
-docker pull python:3.13-slim
-# 3. 打开容器后端
-#    .env 里写：AGENT_EXECUTION_BACKEND=docker
+# 构建（默认走 PyPI；国内建议走清华镜像，快很多）
+docker build -t agentcode-sandbox:1.0 `
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple docker/sandbox
 ```
 
-用 WSL 里自装的 Docker 引擎（不装 Docker Desktop）也可以，把 docker 命令写成前缀即可：
+嫌命令长就直接跑打包好的脚本，它顺带会自检镜像（确认非 root、pytest 可用）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_sandbox_image.ps1
+```
+
+`docker/sandbox/Dockerfile` 只做三件事：基于 `python:3.13-slim`、装 pytest、设好工作目录。
+
+#### 三种装 Docker 的方式
+
+| 方式 | `AGENT_DOCKER_BINARY` | 说明 |
+| --- | --- | --- |
+| Docker Desktop（Windows） | `docker` | 图形界面，装机最省事；默认占 C 盘，且数据目录要另外指到 D 盘 |
+| Docker 引擎装在 WSL 里 | `wsl -d Ubuntu -- docker` | **本项目当前采用**。不用装桌面端、不用图形界面，整块磁盘跟着 WSL 发行版走 |
+| Linux 服务器 | `docker` | 生产环境的标准做法 |
+
+当前这台机器的实际配置（Docker 引擎在 WSL 的 Ubuntu 24.04 里，发行版整个放在 D 盘）：
 
 ```dotenv
+AGENT_EXECUTION_BACKEND=docker
 AGENT_DOCKER_BINARY=wsl -d Ubuntu -- docker
+AGENT_DOCKER_IMAGE=agentcode-sandbox:1.0
 ```
+
+自检命令：
+
+```powershell
+# 看守护进程在不在（正常应输出一个版本号）
+wsl -d Ubuntu -- docker info --format "{{.ServerVersion}}"
+
+# 直接手工跑一个隔离容器，确认断网 + 非 root
+wsl -d Ubuntu -- docker run --rm --network none --read-only --user 65534:65534 `
+  agentcode-sandbox:1.0 python -c "import os; print('uid', os.getuid())"
+```
+
+> Docker 引擎在 WSL 里是 `systemd` 托管的开机自启服务，随发行版一起启动，
+> 平时不需要单独去开它；第一次调用如果 WSL 恰好处于停止状态，会多花几秒唤醒。
 
 配置项一览：
 
