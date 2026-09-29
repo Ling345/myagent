@@ -46,6 +46,55 @@ def test_account_quota_shows_unlimited():
     assert "unlimited" in js
 
 
+# -------------------------------------------------------- 侧栏折叠与拖拽调宽
+
+
+def test_agent_section_can_be_collapsed():
+    html = _html()
+    assert 'id="agent-toggle"' in html
+    assert 'aria-controls="agent-list"' in html
+    assert 'aria-expanded="true"' in html
+    js = _js()
+    assert "agentcode-agents-collapsed" in js
+    assert "setAgentsCollapsed" in js
+
+
+def test_sidebar_width_is_draggable():
+    html = _html()
+    assert 'id="sidebar-resizer"' in html
+    assert 'role="separator"' in html
+    css = " ".join(_css().split())
+    assert "--sidebar-width" in css
+    assert "cursor: col-resize" in css
+    js = _js()
+    assert "agentcode-sidebar-width" in js
+    assert "pointermove" in js
+
+
+def test_sidebar_width_is_clamped():
+    """拖到离谱的宽度要兜住，否则侧栏会把聊天区挤没。"""
+    js = _js()
+    assert "MIN_SIDEBAR_WIDTH = 240" in js
+    assert "MAX_SIDEBAR_WIDTH = 420" in js
+    assert "clampSidebarWidth" in js
+
+
+def test_billing_panel_is_no_longer_height_capped():
+    """原来写死 58vh，套餐卡片只能挤在一条窄缝里。"""
+    css = " ".join(_css().split())
+    assert "max-height: 58vh" not in css
+    # 关键：面板不参与收缩，否则会被会话列表挤成一条缝（实测只剩 30px 高）
+    assert "flex: 0 0 auto" in css
+    assert "max-height: 70vh" in css
+
+
+def test_resizer_is_hidden_on_narrow_screens():
+    css = " ".join(_css().split())
+    assert "@media (max-width: 880px)" in css
+    narrow = css.split("@media (max-width: 880px)", 1)[1]
+    assert ".sidebar-resizer { display: none; }" in narrow
+
+
 def test_page_has_flowing_background_layer():
     assert 'class="flow"' in _html()
     assert "drift-a" in _css()

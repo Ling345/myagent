@@ -35,13 +35,22 @@
     </div>
 
     <div class="app">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <button type="button" id="new-session-button" class="new-chat">＋ 新会话</button>
 
         <p class="sidebar-label">会话</p>
         <div id="session-list" class="session-list"></div>
 
-        <p class="sidebar-label">智能体</p>
+        <button
+          type="button"
+          id="agent-toggle"
+          class="sidebar-toggle"
+          aria-expanded="true"
+          aria-controls="agent-list"
+        >
+          <span class="toggle-arrow" aria-hidden="true">▾</span>
+          <span id="agent-toggle-label">智能体</span>
+        </button>
         <div id="agent-list" class="agent-list"></div>
 
         <div class="account" id="account" hidden>
@@ -65,6 +74,15 @@
           <ul class="billing-orders" id="billing-orders"></ul>
         </section>
       </aside>
+
+      <div
+        class="sidebar-resizer"
+        id="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖动调整侧栏宽度"
+        tabindex="0"
+      ></div>
 
       <main class="chat">
         <header class="chat-head">
