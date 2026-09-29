@@ -205,9 +205,10 @@ def run_stream(
             # 中间件绑定本次请求的事件出口，所以每次请求都换一套
             agent.middlewares = build_middlewares(emit, active_settings)
 
-            # 只有 coding 会写文件；跑之前先拍个快照，跑完比出本轮产物
+            # 会写文件的智能体（coding / test_gen）：跑之前先拍快照，跑完比出本轮产物。
+            # test_gen 也要算进去——它是本项目的作业方向，生成的测试文件必须能在页面上点开。
             code_root = Path(active_settings.code_root).resolve()
-            before = snapshot_files(code_root) if agent_name == "coding" else None
+            before = snapshot_files(code_root) if agent_name in CODE_TOOL_AGENTS else None
 
             result = agent.run(task, context=ctx)
             artifacts = changed_files(before, snapshot_files(code_root)) if before is not None else []

@@ -9,7 +9,8 @@ import urllib.request
 
 import pytest
 
-from agentcode.web.runner import build_tools, changed_files, snapshot_files
+from agentcode.web import runner as runner_module
+from agentcode.web.runner import build_tools, changed_files, run_stream, snapshot_files
 from agentcode.web.server import create_server
 from agentcode.web.sessions import SessionStore
 
@@ -98,6 +99,73 @@ def test_mock_mode_keeps_demo_tools(settings):
     tools = build_tools(mock=True, settings=settings, agent_name="react")
     assert "get_weather" in tools.names()
     assert "run_python" not in tools.names()  # 离线演示不碰真实代码执行
+
+
+# ------------------------------------------------------------ 产物上报范围
+
+
+class _StubResult:
+    """替身智能体的运行结果。"""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.error = None
+        self.success = True
+
+    def to_dict(self) -> dict:
+        return {"answer": self.answer, "success": True}
+
+
+class _StubMemory:
+    max_turns = 5
+    total_turns = 1
+
+    def __len__(self) -> int:
+        return 1
+
+
+class _WritingAgent:
+    """运行时会往工作目录写一个文件的替身智能体。"""
+
+    def __init__(self, root, filename: str) -> None:
+        self.memory = _StubMemory()
+        self.middlewares: list = []
+        self._root = root
+        self._filename = filename
+
+    def run(self, task, context=None):
+        (self._root / self._filename).write_text("def test_x():\n    assert 1\n", encoding="utf-8")
+        return _StubResult("已生成测试")
+
+
+def _answer_event(agent_name: str, settings, tmp_path, monkeypatch, filename: str) -> dict:
+    """跑一次事件流，返回 answer 事件的载荷。"""
+    root = tmp_path / "sandbox"
+    root.mkdir(exist_ok=True)
+    configured = settings.apply_overrides({"code_root": str(root), "allow_code_tools": True})
+    stub = _WritingAgent(root, filename)
+    monkeypatch.setattr(runner_module, "create_backend", lambda *args, **kwargs: stub)
+
+    events = list(
+        run_stream(agent_name, "随便给点东西生成测试", llm_mode="mock", settings=configured)
+    )
+    answers = [event["data"] for event in events if event["type"] == "answer"]
+    assert len(answers) == 1
+    return answers[0]
+
+
+def test_test_gen_reports_generated_files_as_artifacts(settings, tmp_path, monkeypatch):
+    """test_gen 是本项目的作业方向，它产出的测试文件必须上报，页面才点得开。"""
+    payload = _answer_event(
+        "test_gen", settings, tmp_path, monkeypatch, "test_generated.py"
+    )
+    assert [item["path"] for item in payload["artifacts"]] == ["test_generated.py"]
+
+
+def test_chat_agent_does_not_report_artifacts(settings, tmp_path, monkeypatch):
+    """闲聊智能体不写文件，也就没有必要上报产物。"""
+    payload = _answer_event("react", settings, tmp_path, monkeypatch, "whatever.py")
+    assert payload["artifacts"] == []
 
 
 # ------------------------------------------------------------ 文件浏览接口
