@@ -68,6 +68,10 @@ DEFAULT_ALLOW_CODE_TOOLS = False
 #: API key 熔断：连续失败几次摘掉、冷却多久放回来
 DEFAULT_KEY_FAILURE_THRESHOLD = DEFAULT_FAILURE_THRESHOLD
 DEFAULT_KEY_COOLDOWN_SECONDS = DEFAULT_COOLDOWN_SECONDS
+#: 告警：窗口多长、同一规则多久不重复推、错误率阈值
+DEFAULT_ALERT_WINDOW_SECONDS = 300.0
+DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
+DEFAULT_ALERT_ERROR_RATE = 0.5
 
 
 def mask_secret(value: str | None) -> str:
@@ -155,6 +159,11 @@ class Settings:
     allow_code_tools: bool = DEFAULT_ALLOW_CODE_TOOLS
     key_failure_threshold: int = DEFAULT_KEY_FAILURE_THRESHOLD
     key_cooldown_seconds: float = DEFAULT_KEY_COOLDOWN_SECONDS
+    #: 告警 webhook；为空表示只在日志里报，不往外推
+    alert_webhook: str | None = None
+    alert_window_seconds: float = DEFAULT_ALERT_WINDOW_SECONDS
+    alert_cooldown_seconds: float = DEFAULT_ALERT_COOLDOWN_SECONDS
+    alert_error_rate: float = DEFAULT_ALERT_ERROR_RATE
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -236,6 +245,16 @@ class Settings:
             ),
             key_cooldown_seconds=_to_float(
                 pick("AGENT_KEY_COOLDOWN_SECONDS"), DEFAULT_KEY_COOLDOWN_SECONDS
+            ),
+            alert_webhook=pick("AGENT_ALERT_WEBHOOK"),
+            alert_window_seconds=_to_float(
+                pick("AGENT_ALERT_WINDOW_SECONDS"), DEFAULT_ALERT_WINDOW_SECONDS
+            ),
+            alert_cooldown_seconds=_to_float(
+                pick("AGENT_ALERT_COOLDOWN_SECONDS"), DEFAULT_ALERT_COOLDOWN_SECONDS
+            ),
+            alert_error_rate=_to_float(
+                pick("AGENT_ALERT_ERROR_RATE"), DEFAULT_ALERT_ERROR_RATE
             ),
             env_file=str(resolved) if resolved else None,
         )
@@ -330,6 +349,11 @@ class Settings:
             "AGENT_ALLOW_CODE_TOOLS": "是" if self.allow_code_tools else "否",
             "AGENT_KEY_FAILURE_THRESHOLD": str(self.key_failure_threshold),
             "AGENT_KEY_COOLDOWN_SECONDS": str(self.key_cooldown_seconds),
+            # webhook 的 URL 里通常带一串密钥，按密钥处理
+            "AGENT_ALERT_WEBHOOK": mask_secret(self.alert_webhook),
+            "AGENT_ALERT_WINDOW_SECONDS": str(self.alert_window_seconds),
+            "AGENT_ALERT_COOLDOWN_SECONDS": str(self.alert_cooldown_seconds),
+            "AGENT_ALERT_ERROR_RATE": str(self.alert_error_rate),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
