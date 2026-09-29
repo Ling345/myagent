@@ -27,7 +27,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from agentcode.core.errors import AgentCodeError
-from agentcode.plans import effective_plan, get_plan
+from agentcode.plans import UNLIMITED, Plan, effective_plan, get_plan, is_expired
 from agentcode.storage.migrations import run_migrations
 
 DEFAULT_DB_PATH = "traces/agentcode.db"
@@ -232,6 +232,34 @@ class AccountStore:
             )
         return cursor.rowcount > 0
 
+    def apply_plan(
+        self,
+        name: str,
+        plan: str,
+        *,
+        started_at: str,
+        expires_at: str | None,
+    ) -> bool:
+        """把账号的套餐改成指定状态。
+
+        只给 :mod:`agentcode.billing` 用——**别拿它当开通入口**，
+        开通要走 billing 的订单/续期逻辑，否则会算错到期时间。
+        """
+        resolved = get_plan(plan)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE accounts SET plan = ?, plan_started_at = ?, plan_expires_at = ?,"
+                " daily_token_limit = ? WHERE name = ?",
+                (
+                    resolved.name,
+                    started_at,
+                    expires_at,
+                    resolved.daily_tokens,
+                    str(name or "").strip(),
+                ),
+            )
+        return cursor.rowcount > 0
+
     # ------------------------------------------------------------------ 用量
 
     def record_usage(
@@ -310,21 +338,39 @@ class AccountStore:
             lines.append(f"{item['day']},{item['tokens']},{item['calls']}")
         return "\n".join(lines) + "\n"
 
+    def effective_plan(self, account: Account) -> Plan:
+        """账号当前有效的套餐（已过期的自动回落免费）。"""
+        return effective_plan(account.plan, account.plan_expires_at)
+
+    def daily_limit(self, account: Account) -> int:
+        """今天的 token 上限；0 表示不限。"""
+        if account.limit_override is not None:
+            return int(account.limit_override)
+        return self.effective_plan(account).daily_tokens
+
     def remaining_tokens(self, account: Account) -> int:
-        """今天还剩多少 token 额度。"""
+        """今天还剩多少 token；不限量时返回 -1。"""
+        limit = self.daily_limit(account)
+        if limit <= UNLIMITED:
+            return -1
         used, _ = self.usage_today(account.id)
-        return max(0, account.daily_token_limit - used)
+        return max(0, limit - used)
 
     def check_quota(self, account: Account) -> tuple[bool, str]:
         """判断是否还能继续调用；不允许时给出中文原因。"""
         if not account.is_active:
             return False, "账号已被停用，请联系管理员。"
+        limit = self.daily_limit(account)
+        if limit <= UNLIMITED:
+            return True, ""
         used, calls = self.usage_today(account.id)
-        if used >= account.daily_token_limit:
+        if used >= limit:
+            expired = is_expired(account.plan_expires_at)
+            hint = "套餐已到期，" if expired else ""
             return (
                 False,
-                f"今日额度已用完（{used}/{account.daily_token_limit} token，{calls} 次调用），"
-                "明天会自动重置；需要更多额度请升级套餐。",
+                f"今日额度已用完（{used}/{limit} token，{calls} 次调用）；"
+                f"{hint}额度每天 UTC 零点重置，升级套餐可以提高上限。",
             )
         return True, ""
 
