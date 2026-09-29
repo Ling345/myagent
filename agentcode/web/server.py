@@ -114,6 +114,20 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def code_root_for(base: str | Path, account_id: str | None) -> Path:
+    """某个账号的代码工作目录。
+
+    会话目录一直按用户隔离，代码目录**曾经是全局共享的**——也就是说 alice 让
+    agent 写进去的文件，bob 换个账号就能读到。所以这里也按账号分一层。
+
+    免登录模式（``account_id`` 为空，本地自用）退回共享目录，行为不变。
+    """
+    root = Path(base).resolve()
+    if not account_id:
+        return root
+    return (root / str(account_id)).resolve()
+
+
 def scope_settings_for_plan(settings: Settings, plan_name: str | None) -> Settings:
     """按套餐收口本次运行的配置。
 
@@ -559,7 +573,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "缺少 path 参数。"}, status=400)
             return
 
-        root = Path(self._settings().code_root).resolve()
+        account = getattr(self, "_account", None)
+        root = code_root_for(
+            self._settings().code_root, account.id if account is not None else None
+        )
         try:
             target = resolve_in_root(root, relative)
         except ValueError as exc:
@@ -719,6 +736,16 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             settings, account.plan if account is not None else None
         )
         plan = accounts.effective_plan(account) if account is not None else None
+        # 代码工作目录也按账号分一层——否则 A 写的文件 B 能读到（见 code_root_for）
+        settings = settings.apply_overrides(
+            {
+                "code_root": str(
+                    code_root_for(
+                        settings.code_root, account.id if account is not None else None
+                    )
+                )
+            }
+        )
 
         # 频率 + 并发闸门：一次任务会调用模型十几次，只在开头查每日额度挡不住并发
         guard_key = self._client_key()
