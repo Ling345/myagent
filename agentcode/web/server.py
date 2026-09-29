@@ -27,6 +27,7 @@ from agentcode.config import (
     Settings,
 )
 from agentcode.core.registry import default_registry
+from agentcode.plans import get_plan
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
 from agentcode.web.limits import (
     DEFAULT_MAX_CONCURRENT,
@@ -59,6 +60,21 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".json": "application/json; charset=utf-8",
 }
+
+
+def scope_settings_for_plan(settings: Settings, plan_name: str | None) -> Settings:
+    """按套餐收口本次运行的配置。
+
+    现在只收口一件事：套餐不允许执行代码时，把 ``allow_code_tools`` 关掉。
+    注意是**取交集**——全局已经关着的（例如 ``AGENT_ALLOW_CODE_TOOLS=false``），
+    套餐再高也不能把它打开。
+    """
+    if plan_name is None:
+        return settings
+    plan = get_plan(plan_name)
+    if not settings.allow_code_tools or plan.allow_code_tools:
+        return settings
+    return settings.apply_overrides({"allow_code_tools": False})
 
 
 def is_port_open(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout: float = 0.5) -> bool:
@@ -416,14 +432,21 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
     def _account_payload(self, account: Account) -> dict[str, Any]:
         """给前端的账号信息：名字、套餐、今日额度。"""
-        used, calls = self.server.accounts.usage_today(account.id)  # type: ignore[attr-defined]
+        store: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        plan = store.effective_plan(account)
+        used, calls = store.usage_today(account.id)
+        limit = store.daily_limit(account)
+        unlimited = limit <= 0
         return {
             "name": account.name,
             "plan": account.plan,
-            "daily_token_limit": account.daily_token_limit,
+            "plan_title": plan.title,
+            "plan_expires_at": account.plan_expires_at,
+            "unlimited": unlimited,
+            "daily_token_limit": limit,
             "used_today": used,
             "calls_today": calls,
-            "remaining": max(0, account.daily_token_limit - used),
+            "remaining": -1 if unlimited else max(0, limit - used),
         }
 
     def _serve_code_file(self) -> None:
@@ -565,10 +588,19 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             if not allowed:
                 self._send_json({"error": reason}, status=402)
                 return
+        # 套餐收口：免费套餐不允许执行代码时，连工具都不下发给模型
+        settings = scope_settings_for_plan(
+            settings, account.plan if account is not None else None
+        )
+        plan = accounts.effective_plan(account) if account is not None else None
 
         # 频率 + 并发闸门：一次任务会调用模型十几次，只在开头查每日额度挡不住并发
         guard_key = self._client_key()
-        decision = self.server.guard.acquire(guard_key)  # type: ignore[attr-defined]
+        decision = self.server.guard.acquire(  # type: ignore[attr-defined]
+            guard_key,
+            per_minute=plan.per_minute if plan else None,
+            max_concurrent=plan.max_concurrent if plan else None,
+        )
         if not decision.allowed:
             self._reject_by_limit(decision)
             return
@@ -582,7 +614,12 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             if account is not None:
                 answer = finished.answer_event() or {}
                 usage = (answer.get("data") or {}).get("usage") or {}
-                accounts.record_usage(account.id, int(usage.get("total_tokens") or 0), calls=1)
+                accounts.record_usage(
+                    account.id,
+                    int(usage.get("total_tokens") or 0),
+                    calls=1,
+                    run_id=finished.id,
+                )
             self.server.guard.release(guard_key)  # type: ignore[attr-defined]
 
         record = self._registry().start(
@@ -674,6 +711,10 @@ def create_server(
     server.accounts = accounts or AccountStore(  # type: ignore[attr-defined]
         os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH
     )
+    # 账单服务：套餐、订单、用量都从这里拿
+    from agentcode.billing import BillingService
+
+    server.billing = BillingService(server.accounts)  # type: ignore[attr-defined]
     server.secret_key = secret_key or os.environ.get("AGENT_SECRET_KEY") or uuid.uuid4().hex
     server.store_lock = threading.Lock()  # type: ignore[attr-defined]
     server.user_stores = {}  # type: ignore[attr-defined]
