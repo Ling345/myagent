@@ -20,6 +20,9 @@
 >
 > 阶段四进行中：**套餐、用量账本与订单——能收费了**。
 > 详见「套餐与计费」一节。
+>
+> 阶段五进行中：**指标与阈值告警——出问题看得见了**。
+> 详见「指标与告警」一节。
 
 内置四种智能体：
 
@@ -298,6 +301,89 @@ D:\Anaconda\python.exe -m agentcode run --task "我最喜欢的城市是哪个�
 想自己验一把：跑起网页后让智能体干个活，中途按 F5 刷新——任务不会白跑，
 页面会自己接上去。命令行同理，可以看 `GET /api/runs` 里那次运行的状态。
 
+## 指标与告警
+
+服务跑起来之后，「模型失败率多少、容器是不是变慢了、哪把 key 被熔断、
+谁在刷额度」这些问题得答得上来。日志是一行行的，统计只能人肉 grep，所以有了指标。
+
+### `GET /metrics`
+
+Prometheus 文本格式，纯文本、肉眼可读：
+
+```
+# TYPE agentcode_http_requests_total counter
+agentcode_http_requests_total{path="/api/run",status="200"} 12.0
+# TYPE agentcode_llm_calls_total counter
+agentcode_llm_calls_total{key="1",result="ok"} 8.0
+agentcode_llm_calls_total{key="0",result="failed"} 3.0
+# TYPE agentcode_llm_call_seconds histogram
+agentcode_llm_call_seconds_bucket{key="1",le="1"} 6
+agentcode_llm_call_seconds_sum{key="1"} 7.4
+agentcode_llm_call_seconds_count{key="1"} 8
+# TYPE agentcode_sandbox_runs_total counter
+agentcode_sandbox_runs_total{backend="docker",result="ok"} 5.0
+# TYPE agentcode_keypool_trips_total counter
+agentcode_keypool_trips_total{key="0"} 1.0
+```
+
+| 指标 | 说明 |
+| --- | --- |
+| `agentcode_http_requests_total{path,status}` | 请求数。路径收敛成有限集合，未知路径归 `other`、静态资源归 `/static`——否则被人拿随机 URL 扫站就能把标签基数撑爆 |
+| `agentcode_http_request_seconds` | 请求耗时分布 |
+| `agentcode_runs_total{agent,result}` | 任务数。`result` 是 `ok` / `error` / `empty`（流结束了却没有答案，通常是跑到步数上限） |
+| `agentcode_run_seconds` | 任务耗时分布 |
+| `agentcode_llm_calls_total{key,result}` | 模型调用。`key` 是**下标**而不是脱敏明文——指标要往监控系统送，少暴露一点是一点；下标顺序与 `agentcode config` 里那串脱敏 key 一致 |
+| `agentcode_keypool_trips_total{key}` | 某把 key 被熔断了几次 |
+| `agentcode_sandbox_runs_total{backend,result}` | 沙箱执行。`result` 是 `ok` / `failed` / `timeout` / `error`，`backend` 区分 `local` 与 `docker` |
+| `agentcode_rejections_total{reason}` | 被拒的请求：`quota` / `rate_limit` / `concurrency` / `unauthorized` / `bad_credentials` |
+| `agentcode_alerts_total{rule}` | 触发过几次告警 |
+
+**访问控制**：绑在 `127.0.0.1` 上时不要求登录，方便直接 `curl http://127.0.0.1:8000/metrics`；
+一旦监听到别的地址就**必须登录**——指标里有请求路径、账号名和 key 指纹，不该对公网敞开。
+
+### 阈值告警
+
+告警不另起一套埋点：**指标就是唯一的事实来源**。`agentcode/alerts.py` 在固定时间点
+给指标拍快照，用两次快照的差算窗口内的量——调用方一行都不用多写，
+也就不会出现「指标和告警各记各的、对不上」这种经典问题。
+
+| 规则 | 触发条件 | 为什么 |
+| --- | --- | --- |
+| `http_error_rate` | 5xx 占比超过阈值，且样本数够 | 「服务挂了」最直接的信号 |
+| `llm_failure_rate` | 模型调用失败占比超过阈值，且样本数够 | 上游挂了 / key 全废了 |
+| `sandbox_timeout` | 窗口内出现过超时 | 通常是模型写了个死循环 |
+| `keypool_trip` | 窗口内有 key 被熔断 | key 额度用完或失效 |
+
+两个刻意的设计：
+
+- **4xx 不参与错误率**。没登录、参数写错是用户自己的问题，为它们半夜报警，
+  只会让人学会无视告警。
+- **样本太少不做比例判断**（默认 <20）。刚起来两个请求里有一个 5xx，
+  不代表服务挂了。
+
+同一规则有冷却（默认 15 分钟），不会刷屏。
+
+```dotenv
+# 不配 webhook 就只在日志里报，不往外推——本地自己用没必要接
+AGENT_ALERT_WEBHOOK=https://hooks.example.com/你的密钥
+AGENT_ALERT_WINDOW_SECONDS=300
+AGENT_ALERT_COOLDOWN_SECONDS=900
+AGENT_ALERT_ERROR_RATE=0.5
+```
+
+推送的载荷长这样（飞书 / 钉钉 / Slack 的机器人 webhook 都能直接收）：
+
+```json
+{
+  "rule": "llm_failure_rate",
+  "severity": "critical",
+  "message": "最近窗口内模型调用失败率 100%（6/6），检查上游或 API key。",
+  "details": { "ratio": 1.0, "failed": 6, "total": 6 }
+}
+```
+
+推送失败只记一行日志，不影响服务本身。
+
 ## 网站入口与网页
 
 ### 账号与配额
@@ -551,6 +637,10 @@ def add(a: str, b: str) -> str:
 | `AGENT_DOCKER_USER` | 否 | `65534:65534` | 容器内运行用户，留空则不传 `--user` |
 | `AGENT_KEY_FAILURE_THRESHOLD` | 否 | `3` | 某把 key 连续失败几次就被熔断 |
 | `AGENT_KEY_COOLDOWN_SECONDS` | 否 | `60` | 熔断冷却多少秒后自动放回 |
+| `AGENT_ALERT_WEBHOOK` | 否 | 无 | 告警推送地址；不配则只在日志里报 |
+| `AGENT_ALERT_WINDOW_SECONDS` | 否 | `300` | 告警观察窗口（秒） |
+| `AGENT_ALERT_COOLDOWN_SECONDS` | 否 | `900` | 同一规则多久不重复推（秒） |
+| `AGENT_ALERT_ERROR_RATE` | 否 | `0.5` | 错误率阈值 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖上面的数值型字段，
