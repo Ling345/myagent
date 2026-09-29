@@ -47,6 +47,16 @@ class UsageGuard:
 
     # ------------------------------------------------------------------ 频率
 
+    def _limit(self, override: int | None, default: int) -> int:
+        """算这一次要用的限额。
+
+        ``None`` = 用 guard 自己的默认值；``<=0`` = 不限（返回 0）。
+        套餐就是靠这个把「每分钟多少次、同时几个」按用户传下来的。
+        """
+        if override is None:
+            return default
+        return max(0, int(override))
+
     def _window(self, key: str, now: float) -> deque[float]:
         """取该 key 的窗口，并丢掉过期的时间点。"""
         window = self._events.setdefault(key, deque())
@@ -54,16 +64,17 @@ class UsageGuard:
             window.popleft()
         return window
 
-    def check_request(self, key: str) -> LimitDecision:
+    def check_request(self, key: str, per_minute: int | None = None) -> LimitDecision:
         """只做频率检查（用于查询类接口）。"""
+        limit = self._limit(per_minute, self.per_minute)
         now = self._clock()
         with self._lock:
             window = self._window(key, now)
-            if len(window) >= self.per_minute:
+            if limit and len(window) >= limit:
                 wait = max(1, int(WINDOW_SECONDS - (now - window[0])) + 1)
                 return LimitDecision(
                     False,
-                    f"请求过于频繁（每分钟最多 {self.per_minute} 次），请 {wait} 秒后再试。",
+                    f"请求过于频繁（每分钟最多 {limit} 次），请 {wait} 秒后再试。",
                     wait,
                 )
             window.append(now)
@@ -71,17 +82,26 @@ class UsageGuard:
 
     # ------------------------------------------------------------------ 并发
 
-    def acquire(self, key: str) -> LimitDecision:
+    def acquire(
+        self,
+        key: str,
+        per_minute: int | None = None,
+        max_concurrent: int | None = None,
+    ) -> LimitDecision:
         """频率检查通过后，再占用一个并发名额。"""
-        decision = self.check_request(key)
+        decision = self.check_request(key, per_minute)
         if not decision.allowed:
             return decision
+        limit = self._limit(max_concurrent, self.max_concurrent)
+        if not limit:
+            # 不限并发：不占名额，release 也就不会把计数搞乱
+            return LimitDecision(True)
         with self._lock:
             active = self._active.get(key, 0)
-            if active >= self.max_concurrent:
+            if active >= limit:
                 return LimitDecision(
                     False,
-                    f"你已有 {active} 个任务在运行（同时最多 {self.max_concurrent} 个），"
+                    f"你已有 {active} 个任务在运行（当前套餐同时最多 {limit} 个），"
                     "等其中一个结束再试。",
                     5,
                 )

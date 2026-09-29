@@ -133,3 +133,34 @@ def test_budget_middleware_allows_run_within_budget():
 def test_budget_middleware_rejects_bad_limit():
     with pytest.raises(ValueError):
         BudgetMiddleware(max_tokens=0)
+
+
+# --------------------------------------------------- 按次覆盖（套餐驱动限流）
+
+
+def test_guard_accepts_per_call_limits():
+    guard = UsageGuard(per_minute=100, max_concurrent=10)
+    assert guard.acquire("u", per_minute=1, max_concurrent=1).allowed is True
+    assert guard.acquire("u", per_minute=1, max_concurrent=1).allowed is False  # 撞频率
+
+
+def test_guard_treats_non_positive_as_unlimited():
+    guard = UsageGuard(per_minute=1, max_concurrent=1)
+    for _ in range(5):
+        assert guard.acquire("u", per_minute=0, max_concurrent=0).allowed is True
+
+
+def test_guard_none_keeps_the_default():
+    guard = UsageGuard(per_minute=2, max_concurrent=5)
+    assert guard.acquire("u").allowed is True
+    assert guard.acquire("u").allowed is True
+    assert guard.acquire("u").allowed is False
+
+
+def test_guard_unlimited_concurrency_does_not_leak_slots():
+    """不限并发时不占名额，release 也不该把计数搞乱。"""
+    guard = UsageGuard(per_minute=100, max_concurrent=1)
+    assert guard.acquire("u", per_minute=0, max_concurrent=0).allowed is True
+    assert guard.active_count("u") == 0
+    guard.release("u")
+    assert guard.active_count("u") == 0
