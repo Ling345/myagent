@@ -115,3 +115,53 @@ def test_later_migration_runs_after_an_earlier_one(tmp_path):
         [Migration(2, "第二", second), Migration(1, "第一", first)],
     )
     assert order == [1, 2]
+
+
+# ---------------------------------------------------------------- v2：计费结构
+
+
+def test_v2_adds_billing_columns_and_tables(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+    assert {"plan_expires_at", "plan_started_at", "limit_override"} <= columns
+    assert {"usage_ledger", "orders"} <= _tables(conn)
+
+
+def test_v2_migrates_legacy_usage_into_the_ledger(tmp_path):
+    conn = _connect(tmp_path)
+    _make_legacy_database(conn)
+    conn.execute(
+        "INSERT INTO usage (account_id, day, tokens, calls) VALUES ('a1', '2026-09-20', 1234, 7)"
+    )
+    conn.commit()
+
+    run_migrations(conn)
+
+    row = conn.execute(
+        "SELECT account_id, day, tokens, calls, note FROM usage_ledger"
+    ).fetchone()
+    assert row == ("a1", "2026-09-20", 1234, 7, "历史迁移")
+
+
+def test_legacy_usage_is_migrated_only_once(tmp_path):
+    conn = _connect(tmp_path)
+    _make_legacy_database(conn)
+    conn.execute(
+        "INSERT INTO usage (account_id, day, tokens, calls) VALUES ('a1', '2026-09-20', 10, 1)"
+    )
+    conn.commit()
+
+    run_migrations(conn)
+    run_migrations(conn)  # 再跑一次不能重复搬
+
+    count = conn.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0]
+    assert count == 1
+
+
+def test_v2_ledger_has_the_expected_columns(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_ledger)")}
+    assert {"account_id", "day", "created_at", "tokens", "calls", "run_id", "note"} <= columns

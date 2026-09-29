@@ -101,9 +101,69 @@ def _v1_initial(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v2_billing(conn: sqlite3.Connection) -> None:
+    """套餐字段 + 用量账本 + 订单表，并把老的日用量搬进账本。"""
+    add_column(conn, "accounts", "plan_expires_at", "TEXT")
+    add_column(conn, "accounts", "plan_started_at", "TEXT")
+    add_column(conn, "accounts", "limit_override", "INTEGER")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            day TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            tokens INTEGER NOT NULL,
+            calls INTEGER NOT NULL,
+            run_id TEXT,
+            note TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ledger_account_day ON usage_ledger(account_id, day)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            plan TEXT NOT NULL,
+            months INTEGER NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'CNY',
+            status TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_ref TEXT,
+            created_at TEXT NOT NULL,
+            paid_at TEXT,
+            note TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_orders_account ON orders(account_id, created_at DESC)"
+    )
+
+    # 老用量搬进账本：只搬一次，靠 note 标记去重
+    conn.execute(
+        """
+        INSERT INTO usage_ledger (account_id, day, created_at, tokens, calls, run_id, note)
+        SELECT u.account_id, u.day, u.day || 'T00:00:00+00:00', u.tokens, u.calls, NULL, '历史迁移'
+        FROM usage AS u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM usage_ledger AS l
+            WHERE l.account_id = u.account_id AND l.day = u.day AND l.note = '历史迁移'
+        )
+        """
+    )
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
+    Migration(2, "套餐字段、用量账本与订单", _v2_billing),
 ]
 
 
