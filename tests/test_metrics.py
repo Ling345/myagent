@@ -126,3 +126,14 @@ def test_render_is_sorted_for_stable_output():
         'agentcode_s_total{which="a"} 1.0',
         'agentcode_s_total{which="b"} 1.0',
     ]
+
+
+def test_snapshot_is_flat_and_includes_histogram_counts():
+    """告警靠它取两次快照做差，别再出现"方法漏提交"这种事。"""
+    metrics = Metrics()
+    metrics.counter("agentcode_snap_total", "s").inc(which="a", amount=3)
+    metrics.histogram("agentcode_snap_seconds", "s").observe(1.0, kind="x")
+
+    snap = metrics.snapshot()
+    assert snap['agentcode_snap_total{which="a"}'] == 3.0
+    assert snap['agentcode_snap_seconds_count{kind="x"}'] == 1.0
