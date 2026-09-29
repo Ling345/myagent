@@ -90,6 +90,7 @@ METRIC_PATHS = frozenset(
         "/api/plans",
         "/api/billing",
         "/api/billing/checkout",
+        "/api/upload",
     }
 )
 
@@ -126,6 +127,33 @@ def code_root_for(base: str | Path, account_id: str | None) -> Path:
     if not account_id:
         return root
     return (root / str(account_id)).resolve()
+
+
+def safe_upload_name(raw: str) -> str | None:
+    """把上传的文件名清洗成一根"光溜溜"的文件名。
+
+    只取最后一段，`\\` 与 `/` 都当分隔符（Windows 与 Linux 都要挡住），
+    空名字、`.`、`..` 一律拒绝。返回 None 表示这个名字不能用。
+    """
+    name = str(raw or "").replace("\\", "/").split("/")[-1].strip()
+    if not name or name in {".", ".."}:
+        return None
+    return name
+
+
+def directory_size(root: Path) -> int:
+    """目录下所有文件的总字节数（用来算上传配额）。"""
+    if not root.is_dir():
+        return 0
+    total = 0
+    for item in root.rglob("*"):
+        if not item.is_file():
+            continue
+        try:
+            total += item.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def scope_settings_for_plan(settings: Settings, plan_name: str | None) -> Settings:
@@ -336,6 +364,92 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
     def _billing(self) -> Any:
         """当前服务进程的账单服务（套餐、订单、用量）。"""
         return self.server.billing  # type: ignore[attr-defined]
+
+    def _handle_upload(self) -> None:
+        """收一个文本文件，存进调用者**自己**的代码工作目录。
+
+        约定（见 docs 里的设计）：只收文本、单文件有上限、每用户目录有总量上限、
+        文件名只取最后一段、同名覆盖。
+
+        走的是"原始 body"而不是 multipart：Python 3.13 已经把 ``cgi`` 删了，
+        而我们要的只是纯文本，原始 body 最省事也最不容易出差错。
+        """
+        if not self._auth_ok():
+            return
+        account = getattr(self, "_account", None)
+        settings = self._settings()
+
+        raw_name = (parse_qs(urlsplit(self.path).query).get("path") or [""])[0]
+        name = safe_upload_name(raw_name)
+        if name is None:
+            self._send_json({"error": "文件名不合法。"}, status=400)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json({"error": "请求长度不合法。"}, status=400)
+            return
+        if length <= 0:
+            self._send_json({"error": "文件是空的。"}, status=400)
+            return
+        if length > settings.upload_max_bytes:
+            self._send_json(
+                {
+                    "error": f"文件太大（{length} 字节，单个文件上限 "
+                    f"{settings.upload_max_bytes // 1024} KB）。"
+                },
+                status=413,
+            )
+            return
+
+        raw = self.rfile.read(length)
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_json({"error": "只支持 UTF-8 编码的文本文件。"}, status=400)
+            return
+        if b"\x00" in raw:
+            self._send_json({"error": "看起来是二进制文件，这里只支持文本。"}, status=400)
+            return
+
+        root = code_root_for(
+            settings.code_root, account.id if account is not None else None
+        )
+        try:
+            target = resolve_in_root(root, name)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        overwritten = target.is_file()
+        if not overwritten:
+            used = directory_size(root)
+            if used + len(raw) > settings.upload_quota_bytes:
+                self._send_json(
+                    {
+                        "error": f"你的工作目录已经用了 {used // 1024} KB，"
+                        f"再传就超过上限 {settings.upload_quota_bytes // 1024} KB 了。"
+                        "先删掉一些文件再传。"
+                    },
+                    status=413,
+                )
+                return
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        except OSError as exc:
+            self._send_json({"error": f"写入失败：{exc}"}, status=500)
+            return
+
+        self._send_json(
+            {
+                "path": target.relative_to(root).as_posix(),
+                "bytes": len(raw),
+                "overwritten": overwritten,
+            }
+        )
 
     def _serve_metrics(self) -> None:
         """暴露 Prometheus 文本格式的指标。
@@ -612,6 +726,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/logout",
             "/api/run",
             "/api/billing/checkout",
+            "/api/upload",
             "/api/session/reset",
             "/api/sessions/create",
             "/api/sessions/rename",
@@ -645,6 +760,11 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             self._log_access(200)
+            return
+
+        if path == "/api/upload":
+            # 上传的 body 是文件原文，不是 JSON——必须在 _read_json() 之前处理
+            self._handle_upload()
             return
 
         payload = self._read_json()

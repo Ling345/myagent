@@ -72,6 +72,9 @@ DEFAULT_KEY_COOLDOWN_SECONDS = DEFAULT_COOLDOWN_SECONDS
 DEFAULT_ALERT_WINDOW_SECONDS = 300.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 900.0
 DEFAULT_ALERT_ERROR_RATE = 0.5
+#: 文件上传：单个文件上限、每个用户工作目录总上限
+DEFAULT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+DEFAULT_UPLOAD_QUOTA_BYTES = 50 * 1024 * 1024
 
 
 def mask_secret(value: str | None) -> str:
@@ -164,6 +167,8 @@ class Settings:
     alert_window_seconds: float = DEFAULT_ALERT_WINDOW_SECONDS
     alert_cooldown_seconds: float = DEFAULT_ALERT_COOLDOWN_SECONDS
     alert_error_rate: float = DEFAULT_ALERT_ERROR_RATE
+    upload_max_bytes: int = DEFAULT_UPLOAD_MAX_BYTES
+    upload_quota_bytes: int = DEFAULT_UPLOAD_QUOTA_BYTES
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -255,6 +260,12 @@ class Settings:
             ),
             alert_error_rate=_to_float(
                 pick("AGENT_ALERT_ERROR_RATE"), DEFAULT_ALERT_ERROR_RATE
+            ),
+            upload_max_bytes=_to_int(
+                pick("AGENT_UPLOAD_MAX_BYTES"), DEFAULT_UPLOAD_MAX_BYTES
+            ),
+            upload_quota_bytes=_to_int(
+                pick("AGENT_UPLOAD_QUOTA_BYTES"), DEFAULT_UPLOAD_QUOTA_BYTES
             ),
             env_file=str(resolved) if resolved else None,
         )
@@ -354,6 +365,8 @@ class Settings:
             "AGENT_ALERT_WINDOW_SECONDS": str(self.alert_window_seconds),
             "AGENT_ALERT_COOLDOWN_SECONDS": str(self.alert_cooldown_seconds),
             "AGENT_ALERT_ERROR_RATE": str(self.alert_error_rate),
+            "AGENT_UPLOAD_MAX_BYTES": str(self.upload_max_bytes),
+            "AGENT_UPLOAD_QUOTA_BYTES": str(self.upload_quota_bytes),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
