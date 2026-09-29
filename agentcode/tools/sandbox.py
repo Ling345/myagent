@@ -15,10 +15,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+
+from agentcode.metrics import SANDBOX_RUNS, SANDBOX_SECONDS
 
 DEFAULT_DOCKER_IMAGE = "python:3.13-slim"
 DEFAULT_DOCKER_BINARY = "docker"
@@ -61,6 +64,16 @@ class ExecutionResult:
 
 class ExecutionError(RuntimeError):
     """后端本身不可用（例如 Docker 没装或没启动）。"""
+
+
+def _record_execution(backend: str, result: str, started: float) -> None:
+    """把一次沙箱执行记进指标。
+
+    ``result`` 分四种：ok（正常返回）、failed（代码自己报错）、
+    timeout（超时，通常意味着模型写了个死循环）、error（后端本身不可用）。
+    """
+    SANDBOX_RUNS.inc(backend=backend, result=result)
+    SANDBOX_SECONDS.observe(time.perf_counter() - started, backend=backend)
 
 
 def child_env(root: Path) -> dict[str, str]:
@@ -112,6 +125,7 @@ class LocalBackend:
 
     def run(self, code: str, timeout: float) -> ExecutionResult:
         """执行代码并返回结果。"""
+        started = time.perf_counter()
         try:
             completed = subprocess.run(
                 [self.python_executable, "-c", str(code)],
@@ -125,9 +139,12 @@ class LocalBackend:
                 stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired:
+            _record_execution(self.name, "timeout", started)
             return ExecutionResult(124, "", "", timed_out=True, backend=self.name)
         except OSError as exc:
+            _record_execution(self.name, "error", started)
             raise ExecutionError(f"无法启动 Python 解释器（{exc}）") from exc
+        _record_execution(self.name, "ok" if completed.returncode == 0 else "failed", started)
         return ExecutionResult(
             completed.returncode, completed.stdout or "", completed.stderr or "", backend=self.name
         )
@@ -233,8 +250,10 @@ class DockerBackend:
 
     def run(self, code: str, timeout: float) -> ExecutionResult:
         """在容器里执行代码；超时则杀掉容器。"""
+        started = time.perf_counter()
         ok, detail = self.available()
         if not ok:
+            _record_execution(self.name, "error", started)
             raise ExecutionError(
                 f"Docker 不可用（{detail}）。请先启动 Docker，"
                 "或把 AGENT_EXECUTION_BACKEND 改回 local。"
@@ -259,9 +278,12 @@ class DockerBackend:
                 capture_output=True,
                 timeout=30,
             )
+            _record_execution(self.name, "timeout", started)
             return ExecutionResult(124, "", "", timed_out=True, backend=self.name)
         except OSError as exc:
+            _record_execution(self.name, "error", started)
             raise ExecutionError(f"启动容器失败（{exc}）") from exc
+        _record_execution(self.name, "ok" if completed.returncode == 0 else "failed", started)
         return ExecutionResult(
             completed.returncode, completed.stdout or "", completed.stderr or "", backend=self.name
         )
