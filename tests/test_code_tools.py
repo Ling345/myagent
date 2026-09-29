@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -39,7 +40,9 @@ def test_run_python_reports_traceback(sandbox):
 def test_run_python_runs_inside_code_root(sandbox):
     registry, root = sandbox
     output = registry.invoke("run_python", "import os; print(os.getcwd())")
-    assert str(root.resolve()) in output.replace("/", "\\")
+    # 拿最后一行（stdout 里的 cwd）比较，避免 Windows/Linux 分隔符差异
+    printed = output.strip().splitlines()[-1]
+    assert Path(printed).resolve() == root.resolve()
 
 
 def test_run_python_hides_secrets_from_child(monkeypatch, sandbox):

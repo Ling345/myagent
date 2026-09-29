@@ -6,7 +6,7 @@ import ast
 import operator
 import os
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import requests
 
@@ -74,6 +74,43 @@ def current_time(timezone: str = "Asia/Shanghai") -> str:
 
 # ----------------------------------------------------------------------- 搜索
 
+def _serpapi_legacy(params: dict[str, Any]) -> Mapping[str, Any] | None:
+    """serpapi 0.1.x 的接口：``SerpApiClient(...).get_dict()``。
+
+    装的是 1.x 时这个名字不存在，返回 ``None`` 让调用方走新接口。
+    """
+    try:
+        from serpapi import SerpApiClient  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    return SerpApiClient(params).get_dict()
+
+
+def _serpapi_modern(params: dict[str, Any]) -> Mapping[str, Any]:
+    """serpapi 1.x 的接口：模块级 ``search()``，返回 UserDict 子类。"""
+    import serpapi
+
+    result = serpapi.search(params)
+    if not isinstance(result, Mapping):
+        raise TypeError(f"SerpApi 返回了无法解析的内容：{type(result).__name__}")
+    return result
+
+
+def call_serpapi(params: dict[str, Any]) -> Mapping[str, Any]:
+    """真正去调 SerpApi，同时兼容 0.1.x 与 1.x。
+
+    SerpApi 的 Python 客户端在 1.0 里把 ``SerpApiClient`` 换成了模块级 ``search``，
+    而 ``requirements.txt`` 的 ``>=0.1.5`` 会让全新环境装到 1.x。
+    两个版本都接住，避免"换了台机器搜索功能直接报废"。
+
+    单独抽成函数还有个好处：测试替换掉它就行，不用去动三方库。
+    """
+    legacy = _serpapi_legacy(params)
+    if legacy is not None:
+        return legacy
+    return _serpapi_modern(params)
+
+
 def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> str:
     """用 SerpApi 做网页搜索，返回前若干条结果的标题、摘要与链接。
 
@@ -84,9 +121,7 @@ def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> 
     if not key:
         return "错误：未配置 SERPAPI_API_KEY，无法执行网页搜索（在 .env 里填上即可）。"
     try:
-        from serpapi import SerpApiClient
-
-        client = SerpApiClient(
+        results = call_serpapi(
             {
                 "engine": "google",
                 "q": query,
@@ -95,7 +130,6 @@ def web_search(query: str, api_key: str | None = None, max_results: int = 3) -> 
                 "hl": "zh-cn",
             }
         )
-        results = client.get_dict()
     except Exception as exc:  # noqa: BLE001 - 网络或配额问题统一转为提示
         hint = ""
         text = str(exc)

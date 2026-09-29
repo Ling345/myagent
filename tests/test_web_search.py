@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agentcode.tools import ToolRegistry
+from agentcode.tools import builtin
 from agentcode.tools.builtin import register_builtin_tools, web_search
 
 
@@ -14,23 +15,55 @@ class _FakeSerpApi:
     params: dict = {}
     payload: dict = {}
 
-    def __init__(self, params: dict) -> None:
-        type(self).params = params
-
-    def get_dict(self) -> dict:
-        return type(self).payload
+    @classmethod
+    def call(cls, params: dict) -> dict:
+        cls.params = params
+        return cls.payload
 
 
 @pytest.fixture
 def fake_serpapi(monkeypatch):
-    """把 serpapi 客户端换成替身，函数返回设置结果的方法。"""
-    monkeypatch.setattr("serpapi.SerpApiClient", _FakeSerpApi)
+    """把 SerpApi 调用换成替身，函数返回设置结果的方法。
+
+    替换的是 ``builtin.call_serpapi``（我们自己的兼容层），
+    这样测试不依赖装的是 serpapi 0.1.x 还是 1.x。
+    """
+    monkeypatch.setattr(builtin, "call_serpapi", _FakeSerpApi.call)
     _FakeSerpApi.payload = {}
+    _FakeSerpApi.params = {}
 
     def configure(payload: dict) -> None:
         _FakeSerpApi.payload = payload
 
     return configure
+
+
+# -------------------------------------------------- SerpApi 版本兼容（回归）
+
+
+def test_call_serpapi_prefers_legacy_client(monkeypatch):
+    """装了 0.1.x 时走 SerpApiClient。"""
+    monkeypatch.setattr(builtin, "_serpapi_legacy", lambda params: {"answer_box": {"answer": "老接口"}})
+    monkeypatch.setattr(
+        builtin, "_serpapi_modern", lambda params: pytest.fail("不该走到新接口")
+    )
+    assert builtin.call_serpapi({"q": "x"})["answer_box"]["answer"] == "老接口"
+
+
+def test_call_serpapi_falls_back_to_modern_api(monkeypatch):
+    """装了 1.x（没有 SerpApiClient）时走模块级 search。"""
+    monkeypatch.setattr(builtin, "_serpapi_legacy", lambda params: None)
+    monkeypatch.setattr(builtin, "_serpapi_modern", lambda params: {"organic_results": []})
+    assert builtin.call_serpapi({"q": "x"}) == {"organic_results": []}
+
+
+def test_serpapi_modern_rejects_unexpected_payload(monkeypatch):
+    """1.x 在 output=html 时会返回字符串，我们要给出清楚的报错。"""
+    import serpapi
+
+    monkeypatch.setattr(serpapi, "search", lambda params: "<html></html>", raising=False)
+    with pytest.raises(TypeError, match="无法解析"):
+        builtin._serpapi_modern({"q": "x"})
 
 
 # ---------------------------------------------------------------- 密钥注入
@@ -125,7 +158,7 @@ def test_invalid_key_hint(monkeypatch, fake_serpapi):
     def raise_error(params):
         raise RuntimeError("401 Invalid API key")
 
-    monkeypatch.setattr("serpapi.SerpApiClient", raise_error)
+    monkeypatch.setattr(builtin, "call_serpapi", raise_error)
     output = web_search("北京", api_key="bad")
     assert "网页搜索失败" in output
     assert "密钥可能无效" in output
@@ -135,7 +168,7 @@ def test_quota_hint(monkeypatch):
     def raise_error(params):
         raise RuntimeError("429 You have run out of searches")
 
-    monkeypatch.setattr("serpapi.SerpApiClient", raise_error)
+    monkeypatch.setattr(builtin, "call_serpapi", raise_error)
     assert "额度可能已用完" in web_search("北京", api_key="k")
 
 
@@ -143,5 +176,5 @@ def test_generic_error_is_reported(monkeypatch):
     def raise_error(params):
         raise RuntimeError("连接超时")
 
-    monkeypatch.setattr("serpapi.SerpApiClient", raise_error)
+    monkeypatch.setattr(builtin, "call_serpapi", raise_error)
     assert "连接超时" in web_search("北京", api_key="k")

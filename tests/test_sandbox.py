@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from agentcode.tools import ToolRegistry
@@ -86,6 +88,7 @@ def test_translate_mount_path_keeps_windows_path_for_plain_docker(tmp_path):
     assert translate_mount_path(prefix, tmp_path) == str(tmp_path)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="WSL 路径转换只在 Windows 上才有意义")
 def test_translate_mount_path_converts_for_wsl(tmp_path):
     prefix = split_command("wsl -d Ubuntu -- docker")
     converted = translate_mount_path(prefix, tmp_path)
