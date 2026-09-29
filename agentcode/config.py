@@ -35,6 +35,17 @@ DEFAULT_WEB_SESSION_DIR = "traces/web-sessions"
 DEFAULT_CODE_ROOT = "traces/sandbox"
 DEFAULT_CODE_TIMEOUT = 10.0
 DEFAULT_CODE_OUTPUT_LIMIT = 4000
+#: 代码执行后端：local=本机受限直跑（非沙箱），docker=一次性容器隔离
+DEFAULT_EXECUTION_BACKEND = "local"
+DEFAULT_DOCKER_IMAGE = "python:3.13-slim"
+#: docker 命令本身；装了 Docker Desktop 就是 docker，用 WSL 里的 docker 可写
+#: "wsl -d Ubuntu -- docker"
+DEFAULT_DOCKER_BINARY = "docker"
+DEFAULT_DOCKER_MEMORY = "256m"
+DEFAULT_DOCKER_CPUS = "0.5"
+DEFAULT_DOCKER_PIDS_LIMIT = 64
+#: 容器内跑代码用的用户；留空则不传 --user（以镜像默认用户运行）
+DEFAULT_DOCKER_USER = "65534:65534"
 #: 写代码需要比闲聊更多的步数（须与 agents.coding 的默认值一致）
 DEFAULT_CODING_STEPS = 20
 
@@ -116,6 +127,13 @@ class Settings:
     code_root: str = DEFAULT_CODE_ROOT
     code_timeout: float = DEFAULT_CODE_TIMEOUT
     code_output_limit: int = DEFAULT_CODE_OUTPUT_LIMIT
+    execution_backend: str = DEFAULT_EXECUTION_BACKEND
+    docker_image: str = DEFAULT_DOCKER_IMAGE
+    docker_binary: str = DEFAULT_DOCKER_BINARY
+    docker_memory: str = DEFAULT_DOCKER_MEMORY
+    docker_cpus: str = DEFAULT_DOCKER_CPUS
+    docker_pids_limit: int = DEFAULT_DOCKER_PIDS_LIMIT
+    docker_user: str = DEFAULT_DOCKER_USER
     coding_steps: int = DEFAULT_CODING_STEPS
     db_path: str = DEFAULT_DB_PATH
     secret_key: str | None = None
@@ -173,6 +191,17 @@ class Settings:
             code_root=str(pick("AGENT_CODE_ROOT", DEFAULT_CODE_ROOT)),
             code_timeout=_to_float(pick("AGENT_CODE_TIMEOUT"), DEFAULT_CODE_TIMEOUT),
             code_output_limit=_to_int(pick("AGENT_CODE_OUTPUT_LIMIT"), DEFAULT_CODE_OUTPUT_LIMIT),
+            execution_backend=str(
+                pick("AGENT_EXECUTION_BACKEND", DEFAULT_EXECUTION_BACKEND)
+            ).strip().lower(),
+            docker_image=str(pick("AGENT_DOCKER_IMAGE", DEFAULT_DOCKER_IMAGE)),
+            docker_binary=str(pick("AGENT_DOCKER_BINARY", DEFAULT_DOCKER_BINARY)),
+            docker_memory=str(pick("AGENT_DOCKER_MEMORY", DEFAULT_DOCKER_MEMORY)),
+            docker_cpus=str(pick("AGENT_DOCKER_CPUS", DEFAULT_DOCKER_CPUS)),
+            docker_pids_limit=_to_int(
+                pick("AGENT_DOCKER_PIDS_LIMIT"), DEFAULT_DOCKER_PIDS_LIMIT
+            ),
+            docker_user=str(pick("AGENT_DOCKER_USER", DEFAULT_DOCKER_USER)),
             coding_steps=_to_int(pick("AGENT_CODING_STEPS"), DEFAULT_CODING_STEPS),
             db_path=str(pick("AGENT_DB_PATH", DEFAULT_DB_PATH)),
             secret_key=pick("AGENT_SECRET_KEY"),
@@ -238,6 +267,10 @@ class Settings:
         for name, value in limits.items():
             if value <= 0:
                 raise ConfigError(f"{name} 必须大于 0。")
+        if self.execution_backend not in {"local", "docker"}:
+            raise ConfigError(
+                f"AGENT_EXECUTION_BACKEND 只支持 local 或 docker，当前是：{self.execution_backend}。"
+            )
         return self
 
     def max_steps_for(self, agent_name: str) -> int:
@@ -269,6 +302,12 @@ class Settings:
             "AGENT_WEB_SESSION_DIR": self.web_session_dir,
             "AGENT_CODE_ROOT": self.code_root,
             "AGENT_CODE_TIMEOUT": str(self.code_timeout),
+            "AGENT_EXECUTION_BACKEND": self.execution_backend,
+            "AGENT_DOCKER_IMAGE": self.docker_image,
+            "AGENT_DOCKER_BINARY": self.docker_binary,
+            "AGENT_DOCKER_MEMORY": self.docker_memory,
+            "AGENT_DOCKER_CPUS": self.docker_cpus,
+            "AGENT_DOCKER_PIDS_LIMIT": str(self.docker_pids_limit),
             "AGENT_TRACE_DIR": self.trace_dir,
             ".env 来源": self.env_file or "（未找到，使用进程环境变量）",
         }

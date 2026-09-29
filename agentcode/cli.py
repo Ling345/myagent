@@ -219,6 +219,13 @@ def _build_tools(
         timeout=settings.code_timeout,
         output_limit=settings.code_output_limit,
         create=create_root,
+        execution_backend=settings.execution_backend,
+        docker_image=settings.docker_image,
+        docker_binary=settings.docker_binary,
+        docker_memory=settings.docker_memory,
+        docker_cpus=settings.docker_cpus,
+        docker_pids_limit=settings.docker_pids_limit,
+        docker_user=settings.docker_user,
     )
     return registry
 

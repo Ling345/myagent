@@ -1,18 +1,30 @@
 """受限代码执行与文件读写工具。
 
-这不是安全沙箱：Python 子进程本身仍能访问文件系统与网络。
-它的目的是"防误伤与跑飞"——固定在独立工作目录、限时、限输出、剥离密钥环境变量，
-默认不碰项目源码。详见 docs/superpowers/specs/2026-09-22-coding-agent-design.md。
+执行部分委托给 :mod:`agentcode.tools.sandbox`，有两种后端：
+
+- ``local``（默认）：本机子进程直跑，固定在独立工作目录、限时、限输出、剥离密钥环境变量。
+  目的是"防误伤与跑飞"，**不是安全沙箱**。
+- ``docker``：一次性容器隔离执行（断网、只读根、资源受限）。
+
+详见 docs/superpowers/specs/2026-09-22-coding-agent-design.md。
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 from agentcode.tools.base import ToolRegistry
+from agentcode.tools.sandbox import (
+    DEFAULT_CPUS,
+    DEFAULT_CONTAINER_USER,
+    DEFAULT_DOCKER_BINARY,
+    DEFAULT_DOCKER_IMAGE,
+    DEFAULT_MEMORY,
+    DEFAULT_PIDS_LIMIT,
+    ExecutionError,
+    describe_backend,
+    make_backend,
+)
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_OUTPUT_LIMIT = 4000
@@ -20,29 +32,6 @@ DEFAULT_MAX_FILE_BYTES = 200 * 1024
 MIN_TIMEOUT = 0.5
 MAX_TIMEOUT = 60.0
 MAX_LISTED_FILES = 100
-
-#: 允许传给子进程的环境变量（白名单，绝不包含任何密钥）
-ENV_ALLOWLIST = (
-    "PATH",
-    "SYSTEMROOT",
-    "SYSTEMDRIVE",
-    "WINDIR",
-    "TEMP",
-    "TMP",
-    "COMSPEC",
-    "PATHEXT",
-    "NUMBER_OF_PROCESSORS",
-    "OS",
-)
-
-
-def _child_env(root: Path) -> dict[str, str]:
-    """构造子进程环境：白名单 + 让子进程能 import 根目录下的模块。"""
-    env = {key: os.environ[key] for key in ENV_ALLOWLIST if key in os.environ}
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONPATH"] = str(root)
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return env
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -76,43 +65,54 @@ def register_code_tools(
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     python_executable: str | None = None,
     create: bool = True,
+    execution_backend: str = "local",
+    docker_image: str = DEFAULT_DOCKER_IMAGE,
+    docker_binary: str = DEFAULT_DOCKER_BINARY,
+    docker_memory: str = DEFAULT_MEMORY,
+    docker_cpus: str = DEFAULT_CPUS,
+    docker_pids_limit: int = DEFAULT_PIDS_LIMIT,
+    docker_user: str = DEFAULT_CONTAINER_USER,
 ) -> ToolRegistry:
     """把代码执行与文件工具注册进工具箱。
 
     ``timeout`` 是单次执行的默认时限（秒），每次调用可以用 ``timeout_seconds``
     小幅提高，但不会超过 ``MAX_TIMEOUT``；``create=False`` 时不会创建工作目录
     （只想列工具清单时用）。
+
+    ``execution_backend`` 选 ``local`` 或 ``docker``；选 docker 时若环境不可用，
+    工具会返回明确的中文错误，而**不会**退回本机执行。
     """
     code_root = Path(root).resolve()
     if create:
         code_root.mkdir(parents=True, exist_ok=True)
-    executable = python_executable or sys.executable
     location = f"（工作目录：{code_root}）"
+    runner = make_backend(
+        execution_backend,
+        code_root,
+        python_executable=python_executable,
+        docker_image=docker_image,
+        docker_binary=docker_binary,
+        docker_memory=docker_memory,
+        docker_cpus=docker_cpus,
+        docker_pids_limit=docker_pids_limit,
+        docker_user=docker_user,
+    )
+    backend_note = describe_backend(runner)
 
     def run_python(code: str, timeout_seconds: float | None = None) -> str:
         """在代码工作目录里执行一段 Python 代码。"""
         requested = float(timeout_seconds) if timeout_seconds else float(timeout)
         limit = max(MIN_TIMEOUT, min(requested, MAX_TIMEOUT))
         try:
-            completed = subprocess.run(
-                [executable, "-c", str(code)],
-                cwd=str(code_root),
-                env=_child_env(code_root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=limit,
-                stdin=subprocess.DEVNULL,
-            )
-        except subprocess.TimeoutExpired:
+            result = runner.run(str(code), limit)
+        except ExecutionError as exc:
+            return f"错误：{exc}"
+        if result.timed_out:
             return f"错误：代码执行超时（超过 {limit:g} 秒），进程已终止。"
-        except OSError as exc:
-            return f"错误：无法启动 Python 解释器（{exc}）。"
 
-        parts = [f"退出码：{completed.returncode}"]
-        stdout = (completed.stdout or "").strip()
-        stderr = (completed.stderr or "").strip()
+        parts = [f"退出码：{result.returncode}"]
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
         if stdout:
             parts.append("--- stdout ---\n" + _truncate(stdout, output_limit))
         if stderr:
@@ -180,7 +180,8 @@ def register_code_tools(
 
     registry.register_tool(
         "run_python",
-        "在代码工作目录执行一段 Python 代码，返回退出码与 stdout/stderr。改完代码必须用它跑一遍。",
+        "在代码工作目录执行一段 Python 代码，返回退出码与 stdout/stderr。改完代码必须用它跑一遍。"
+        f"执行环境：{backend_note}。",
         run_python,
         {"code": "要执行的 Python 代码", "timeout_seconds": "可选，超时秒数（上限 60）"},
     )

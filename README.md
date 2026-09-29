@@ -112,7 +112,7 @@ coding 智能体的答案**不提测试、用例、通过与否、命令或 stdo
 > 成 `Settings` 的，不会污染进程环境变量，于是每次都返回"未配置"。现在密钥由框架从配置注入，
 > 并有回归测试守着（`tests/test_web_search.py`）。
 
-### 受限执行，但**不是安全沙箱**
+### 执行后端一：`local`（默认，本机受限）
 
 工具默认把代码跑在 `AGENT_CODE_ROOT`（默认 `traces/sandbox`），**不碰项目源码**。约束：
 
@@ -124,7 +124,50 @@ coding 智能体的答案**不提测试、用例、通过与否、命令或 stdo
 | 输出长度 | 截断到 `AGENT_CODE_OUTPUT_LIMIT`（默认 4000 字符），避免刷爆上下文 |
 
 必须说清楚：Python 子进程本身仍能访问文件系统与网络，这套约束防的是"误伤与跑飞"，
-不是防御恶意代码。真要跑不可信代码，需要容器或独立账号。
+不是防御恶意代码。所以它只是**开发期默认值**。
+
+### 执行后端二：`docker`（面向公网时用这个）
+
+把 `AGENT_EXECUTION_BACKEND` 设成 `docker`，代码就改在一次性容器里执行：
+
+| 隔离项 | 做法 |
+| --- | --- |
+| 网络 | `--network none`，容器内**完全不能联网** |
+| 文件系统 | `--read-only` 根文件系统只读，只有 `AGENT_CODE_ROOT` 挂成可写，`/tmp` 是 32MB 内存盘 |
+| 权限 | `--user 65534:65534`（nobody），非 root |
+| 资源 | `--memory 256m`、`--cpus 0.5`、`--pids-limit 64`（防内存爆炸与 fork 炸弹） |
+| 生命周期 | `--rm` 用完即删；超时先杀容器再回报，不留残骸 |
+| 密钥 | 容器里只注入 `PYTHONPATH`/`PYTHONIOENCODING`，宿主机的 `.env` 与密钥一律看不见 |
+
+关键设计：**选了 docker 但环境不可用时直接报错，绝不悄悄退回本机执行**——
+"以为隔离了其实没隔离"比不隔离更危险，这条有回归测试守着（`tests/test_sandbox.py`）。
+
+```powershell
+# 1. 装好并启动 Docker（Windows 上装 Docker Desktop 即可）
+docker info --format "{{.ServerVersion}}"
+# 2. 拉好基础镜像（只需一次）
+docker pull python:3.13-slim
+# 3. 打开容器后端
+#    .env 里写：AGENT_EXECUTION_BACKEND=docker
+```
+
+用 WSL 里自装的 Docker 引擎（不装 Docker Desktop）也可以，把 docker 命令写成前缀即可：
+
+```dotenv
+AGENT_DOCKER_BINARY=wsl -d Ubuntu -- docker
+```
+
+配置项一览：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AGENT_EXECUTION_BACKEND` | `local` | `local` 或 `docker` |
+| `AGENT_DOCKER_IMAGE` | `python:3.13-slim` | 执行镜像 |
+| `AGENT_DOCKER_BINARY` | `docker` | docker 命令本身，可写成 `wsl -d Ubuntu -- docker` |
+| `AGENT_DOCKER_MEMORY` | `256m` | 容器内存上限 |
+| `AGENT_DOCKER_CPUS` | `0.5` | 容器 CPU 上限 |
+| `AGENT_DOCKER_PIDS_LIMIT` | `64` | 容器内进程数上限 |
+| `AGENT_DOCKER_USER` | `65534:65534` | 容器内运行用户；留空则用镜像默认用户 |
 
 ## 上下文记忆
 
@@ -367,6 +410,13 @@ def add(a: str, b: str) -> str:
 | `AGENT_CODE_ROOT` | 否 | `traces/sandbox` | 代码执行的工作目录 |
 | `AGENT_CODE_TIMEOUT` | 否 | `10` | 单次代码执行超时（秒） |
 | `AGENT_CODE_OUTPUT_LIMIT` | 否 | `4000` | 执行输出截断长度（字符） |
+| `AGENT_EXECUTION_BACKEND` | 否 | `local` | 代码执行后端：`local` 或 `docker` |
+| `AGENT_DOCKER_IMAGE` | 否 | `python:3.13-slim` | 容器执行镜像 |
+| `AGENT_DOCKER_BINARY` | 否 | `docker` | docker 命令，可写成 `wsl -d Ubuntu -- docker` |
+| `AGENT_DOCKER_MEMORY` | 否 | `256m` | 容器内存上限 |
+| `AGENT_DOCKER_CPUS` | 否 | `0.5` | 容器 CPU 上限 |
+| `AGENT_DOCKER_PIDS_LIMIT` | 否 | `64` | 容器内进程数上限 |
+| `AGENT_DOCKER_USER` | 否 | `65534:65534` | 容器内运行用户，留空则不传 `--user` |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖上面的数值型字段，
