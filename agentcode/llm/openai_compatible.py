@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from agentcode.core.errors import ConfigError, LLMError
@@ -18,6 +19,7 @@ from agentcode.llm.keypool import (
     KeyPool,
     parse_keys,
 )
+from agentcode.metrics import LLM_CALLS, LLM_SECONDS
 
 #: 按 (base_url, api_key, timeout) 复用同一个 SDK 客户端，
 #: 避免每次请求都重新建连接池、重做 TLS 握手
@@ -31,6 +33,12 @@ RETRYABLE_STATUS = frozenset({401, 403, 408, 409, 425, 429, 500, 502, 503, 504, 
 
 class _RetryableLLMError(LLMError):
     """换个 key 还有救的错误（外部不要依赖这个类型）。"""
+
+
+def _record_llm_call(key_index: int, result: str, started: float) -> None:
+    """把一次模型调用的成败与耗时记进指标。"""
+    LLM_CALLS.inc(key=str(key_index), result=result)
+    LLM_SECONDS.observe(time.perf_counter() - started, key=str(key_index))
 
 
 def _shared_client(api_key: str, base_url: str, timeout: float) -> Any:
@@ -147,9 +155,14 @@ class OpenAICompatibleLLM(BaseLLM):
 
     # ------------------------------------------------------------------ 调用
 
-    def _call_once(self, messages: Sequence[Message], temperature: float, api_key: str) -> str:
-        """用指定 key 完整跑一次请求（含流式读取）。"""
-        client = self._client_for(api_key)
+    def _call_once(self, messages: Sequence[Message], temperature: float, state: Any) -> str:
+        """用指定 key 完整跑一次请求（含流式读取）。
+
+        顺手把耗时与成败记进指标——标签用 key 的**下标**，
+        下标顺序与 `agentcode config` 里那串脱敏 key 一致。
+        """
+        client = self._client_for(state.key)
+        started = time.perf_counter()
         try:
             response = client.chat.completions.create(
                 model=self.model,
@@ -160,6 +173,7 @@ class OpenAICompatibleLLM(BaseLLM):
             if not self.stream:
                 content = response.choices[0].message.content or ""
                 self._last_usage = _usage_to_dict(getattr(response, "usage", None))
+                _record_llm_call(state.index, "ok", started)
                 return content
 
             chunks: list[str] = []
@@ -181,10 +195,13 @@ class OpenAICompatibleLLM(BaseLLM):
                 "completion_tokens": len(text) // 2,
                 "estimated": True,
             }
+            _record_llm_call(state.index, "ok", started)
             return text
         except LLMError:
+            _record_llm_call(state.index, "failed", started)
             raise
         except Exception as exc:  # noqa: BLE001 - 统一转成框架异常
+            _record_llm_call(state.index, "failed", started)
             message = f"调用大语言模型失败：{exc}"
             if is_retryable(exc):
                 raise _RetryableLLMError(message) from exc
@@ -205,7 +222,7 @@ class OpenAICompatibleLLM(BaseLLM):
             if state is None:
                 break
             try:
-                text = self._call_once(messages, used_temperature, state.key)
+                text = self._call_once(messages, used_temperature, state)
             except _RetryableLLMError as exc:
                 # 这个 key 有问题（限流/额度/停用/抖动）：记账后换下一个
                 self.pool.report_failure(state)
