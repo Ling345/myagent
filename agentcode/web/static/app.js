@@ -43,6 +43,10 @@ const els = {
   billingUsageText: document.getElementById("billing-usage-text"),
   billingPlans: document.getElementById("billing-plans"),
   billingOrders: document.getElementById("billing-orders"),
+  uploadButton: document.getElementById("upload-button"),
+  uploadInput: document.getElementById("upload-input"),
+  uploadChips: document.getElementById("upload-chips"),
+  composer: document.getElementById("run-form"),
   logoutButton: document.getElementById("logout-button"),
 };
 
@@ -1005,6 +1009,100 @@ els.billingClose.addEventListener("click", () => {
 });
 
 // ------------------------------------------------------ 侧栏布局：折叠与调宽
+
+// ------------------------------------------------------------ 上传文件
+
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 把文件传进自己的工作目录（每个账号一个目录，互相看不到）。
+ *
+ * 走原始 body 而不是 FormData：要的只是文本，不走 multipart 更简单，
+ * 服务端也少一层解析。
+ */
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  els.runStatus.textContent = `正在上传 ${files.length} 个文件…`;
+
+  const failed = [];
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      failed.push(`${file.name}（超过 2MB）`);
+      continue;
+    }
+    try {
+      const response = await fetch(`/api/upload?path=${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: file,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        failed.push(`${file.name}（${payload.error || response.status}）`);
+        continue;
+      }
+      addUploadChip(payload.path, payload.bytes);
+    } catch (error) {
+      failed.push(`${file.name}（${error.message}）`);
+    }
+  }
+
+  els.runStatus.textContent = failed.length
+    ? `没能上传：${failed.join("；")}`
+    : "上传好了，直接说要对它做什么就行。";
+}
+
+/** 上传成功后挂一个小标签，点开就能看内容。 */
+function addUploadChip(path, bytes) {
+  els.uploadChips.hidden = false;
+  const existing = Array.from(els.uploadChips.querySelectorAll(".upload-chip")).find(
+    (chip) => chip.dataset.path === path
+  );
+  if (existing) existing.remove(); // 覆盖上传时只留一个
+
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "upload-chip";
+  chip.dataset.path = path;
+  chip.textContent = `${path} · ${formatBytes(bytes)}`;
+  chip.title = "点开看文件内容";
+  chip.addEventListener("click", () => openViewer(path, bytes));
+  els.uploadChips.appendChild(chip);
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 拖到输入区就能上传。 */
+function wireDropZone() {
+  const zone = els.composer;
+  ["dragenter", "dragover"].forEach((name) =>
+    zone.addEventListener(name, (event) => {
+      event.preventDefault();
+      zone.classList.add("is-dropping");
+    })
+  );
+  ["dragleave", "dragend"].forEach((name) =>
+    zone.addEventListener(name, () => zone.classList.remove("is-dropping"))
+  );
+  zone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    zone.classList.remove("is-dropping");
+    uploadFiles(event.dataTransfer && event.dataTransfer.files);
+  });
+}
+
+els.uploadButton.addEventListener("click", () => els.uploadInput.click());
+els.uploadInput.addEventListener("change", () => {
+  uploadFiles(els.uploadInput.files);
+  els.uploadInput.value = ""; // 同一个文件再传一次也要触发 change
+});
+wireDropZone();
 
 function clampSidebarWidth(px) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, px));
