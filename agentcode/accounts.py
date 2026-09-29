@@ -1,9 +1,14 @@
-"""账号与用量：收费产品的地基。
+"""账号、用量账本与订单：收费产品的地基。
 
-用 SQLite（标准库 sqlite3，零依赖、事务可靠）保存两样东西：
+用 SQLite（标准库 sqlite3，零依赖、事务可靠）保存三样东西：
 
-1. ``accounts``：账号、密码哈希、套餐、每日 token 上限、启用状态；
-2. ``usage``：按（账号, 日期）累计的 token 与调用次数，用来做配额与账单。
+1. ``accounts``：账号、密码哈希、套餐、到期时间、额度覆盖、启用状态；
+2. ``usage_ledger``：用量账本，**一行 = 一次运行**（含运行编号）；
+   今日用量、区间用量、账单、导出，全部从它算；
+3. ``orders``：订单（套餐、金额、状态、支付渠道）。
+
+表结构由 :mod:`agentcode.storage.migrations` 拥有并负责升级，这里不再自己建表——
+原来那套 ``CREATE TABLE IF NOT EXISTS`` 加不了新列，库里有真实账号时会原地爆掉。
 
 密码用 PBKDF2-SHA256 加盐哈希，不保存明文。
 """
@@ -22,6 +27,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from agentcode.core.errors import AgentCodeError
+from agentcode.plans import effective_plan, get_plan
+from agentcode.storage.migrations import run_migrations
 
 DEFAULT_DB_PATH = "traces/agentcode.db"
 DEFAULT_DAILY_TOKEN_LIMIT = 50_000
@@ -65,9 +72,14 @@ class Account:
     name: str
     password_hash: str
     plan: str = "free"
+    #: **派生值**：有 limit_override 用它，否则用套餐的日额度（0 = 不限）
     daily_token_limit: int = DEFAULT_DAILY_TOKEN_LIMIT
     is_active: bool = True
     created_at: str = ""
+    plan_started_at: str | None = None
+    plan_expires_at: str | None = None
+    #: 账号级额度覆盖；为空则跟随套餐
+    limit_override: int | None = None
 
 
 class AccountStore:
@@ -83,31 +95,13 @@ class AccountStore:
         self._init_schema()
 
     def _init_schema(self) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS accounts (
-                    id TEXT PRIMARY KEY,
-                    name TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    plan TEXT NOT NULL DEFAULT 'free',
-                    daily_token_limit INTEGER NOT NULL,
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL
-                )
-                """
-            )
-            self._conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS usage (
-                    account_id TEXT NOT NULL,
-                    day TEXT NOT NULL,
-                    tokens INTEGER NOT NULL DEFAULT 0,
-                    calls INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (account_id, day)
-                )
-                """
-            )
+        """建表与升级结构。
+
+        真正的 schema 定义在 :mod:`agentcode.storage.migrations` 里；
+        打开老库时这里会自动把它升到最新版本。
+        """
+        with self._lock:
+            run_migrations(self._conn)
 
     # ------------------------------------------------------------------ 账号
 
@@ -126,19 +120,23 @@ class AccountStore:
         if daily_token_limit is not None and daily_token_limit <= 0:
             raise AgentCodeError("每日 token 上限必须大于 0。")
 
+        resolved = get_plan(plan)
+        override = int(daily_token_limit) if daily_token_limit is not None else None
         account = Account(
             id=uuid.uuid4().hex[:12],
             name=cleaned,
             password_hash=hash_password(password),
-            plan=plan,
-            daily_token_limit=daily_token_limit or DEFAULT_DAILY_TOKEN_LIMIT,
+            plan=resolved.name,
+            # 显式给了额度就当作覆盖，否则跟随套餐
+            daily_token_limit=override if override is not None else resolved.daily_tokens,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            limit_override=override,
         )
         try:
             with self._lock, self._conn:
                 self._conn.execute(
                     "INSERT INTO accounts (id, name, password_hash, plan, daily_token_limit,"
-                    " is_active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                    " is_active, created_at, limit_override) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
                     (
                         account.id,
                         account.name,
@@ -146,6 +144,7 @@ class AccountStore:
                         account.plan,
                         account.daily_token_limit,
                         account.created_at,
+                        account.limit_override,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -154,14 +153,19 @@ class AccountStore:
 
     @staticmethod
     def _row_to_account(row: sqlite3.Row) -> Account:
+        override = row["limit_override"]
+        plan = effective_plan(row["plan"], row["plan_expires_at"])
         return Account(
             id=row["id"],
             name=row["name"],
             password_hash=row["password_hash"],
             plan=row["plan"],
-            daily_token_limit=int(row["daily_token_limit"]),
+            daily_token_limit=int(override) if override is not None else plan.daily_tokens,
             is_active=bool(row["is_active"]),
             created_at=row["created_at"],
+            plan_started_at=row["plan_started_at"],
+            plan_expires_at=row["plan_expires_at"],
+            limit_override=None if override is None else int(override),
         )
 
     def get(self, name: str) -> Account | None:
@@ -215,47 +219,96 @@ class AccountStore:
         return cursor.rowcount > 0
 
     def set_limit(self, name: str, daily_token_limit: int) -> bool:
-        """调整某个账号的每日额度（卖套餐时用）。"""
+        """调整某个账号的每日额度。
+
+        这会写成一个**账号级覆盖**，优先级高于套餐额度（客服补偿、临时提额用）。
+        """
         if daily_token_limit <= 0:
             raise AgentCodeError("每日 token 上限必须大于 0。")
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "UPDATE accounts SET daily_token_limit = ? WHERE name = ?",
-                (daily_token_limit, str(name or "").strip()),
+                "UPDATE accounts SET limit_override = ?, daily_token_limit = ? WHERE name = ?",
+                (daily_token_limit, daily_token_limit, str(name or "").strip()),
             )
         return cursor.rowcount > 0
 
     # ------------------------------------------------------------------ 用量
 
-    def record_usage(self, account_id: str, tokens: int, calls: int = 1) -> None:
-        """累加用量。"""
-        day = _today()
+    def record_usage(
+        self,
+        account_id: str,
+        tokens: int,
+        calls: int = 1,
+        *,
+        run_id: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """往账本里记一笔用量。
+
+        账本是**唯一的用量事实来源**：老那张 ``usage`` 日计数器只读不写了
+        （保留是为了回滚，不是为了查询）。
+        """
+        now = datetime.now(timezone.utc)
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO usage (account_id, day, tokens, calls) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(account_id, day) DO UPDATE SET"
-                " tokens = tokens + excluded.tokens, calls = calls + excluded.calls",
-                (account_id, day, max(0, int(tokens)), max(0, int(calls))),
+                "INSERT INTO usage_ledger"
+                " (account_id, day, created_at, tokens, calls, run_id, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    account_id,
+                    now.date().isoformat(),
+                    now.isoformat(timespec="seconds"),
+                    max(0, int(tokens)),
+                    max(0, int(calls)),
+                    run_id,
+                    note,
+                ),
             )
+
+    def ledger_rows(self, account_id: str, limit: int = 50) -> list[dict[str, object]]:
+        """最近的账本明细，新的排前面。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT day, created_at, tokens, calls, run_id, note FROM usage_ledger"
+                " WHERE account_id = ? ORDER BY id DESC LIMIT ?",
+                (account_id, max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def usage_between(self, account_id: str, start_day: str, end_day: str) -> tuple[int, int]:
+        """闭区间的用量汇总（按 UTC 日期）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(tokens), 0), COALESCE(SUM(calls), 0) FROM usage_ledger"
+                " WHERE account_id = ? AND day BETWEEN ? AND ?",
+                (account_id, start_day, end_day),
+            ).fetchone()
+        return (int(row[0]), int(row[1]))
 
     def usage_today(self, account_id: str) -> tuple[int, int]:
         """返回 (今天已用 token, 今天调用次数)。"""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT tokens, calls FROM usage WHERE account_id = ? AND day = ?",
-                (account_id, _today()),
-            ).fetchone()
-        return (int(row["tokens"]), int(row["calls"])) if row else (0, 0)
+        today = _today()
+        return self.usage_between(account_id, today, today)
 
     def usage_history(self, account_id: str, limit: int = 30) -> list[dict[str, object]]:
-        """最近的每日用量，用于账单与报表。"""
+        """最近 N 天的每日用量，用于账单与报表。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT day, tokens, calls FROM usage WHERE account_id = ?"
-                " ORDER BY day DESC LIMIT ?",
+                "SELECT day, SUM(tokens) AS tokens, SUM(calls) AS calls FROM usage_ledger"
+                " WHERE account_id = ? GROUP BY day ORDER BY day DESC LIMIT ?",
                 (account_id, max(1, int(limit))),
             ).fetchall()
-        return [{"day": row["day"], "tokens": row["tokens"], "calls": row["calls"]} for row in rows]
+        return [
+            {"day": row["day"], "tokens": int(row["tokens"]), "calls": int(row["calls"])}
+            for row in rows
+        ]
+
+    def export_usage_csv(self, account_id: str, limit: int = 90) -> str:
+        """把最近的每日用量导成 CSV，给用户对账用。"""
+        lines = ["日期,Token,调用次数"]
+        for item in reversed(self.usage_history(account_id, limit)):
+            lines.append(f"{item['day']},{item['tokens']},{item['calls']}")
+        return "\n".join(lines) + "\n"
 
     def remaining_tokens(self, account: Account) -> int:
         """今天还剩多少 token 额度。"""
@@ -276,10 +329,10 @@ class AccountStore:
         return True, ""
 
     def reset_usage(self, account_id: str, day: str | None = None) -> None:
-        """清空某天的用量（客服补偿或测试用）。"""
+        """抹掉某天的账本记录（客服补偿或测试用）。"""
         with self._lock, self._conn:
             self._conn.execute(
-                "DELETE FROM usage WHERE account_id = ? AND day = ?",
+                "DELETE FROM usage_ledger WHERE account_id = ? AND day = ?",
                 (account_id, day or _today()),
             )
 
