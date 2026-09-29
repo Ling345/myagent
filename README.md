@@ -17,6 +17,9 @@
 >
 > 阶段三进行中：**运行状态独立于浏览器连接（刷新/断网都能续上）**。
 > 详见「运行状态与断线续传」一节。
+>
+> 阶段四进行中：**套餐、用量账本与订单——能收费了**。
+> 详见「套餐与计费」一节。
 
 内置四种智能体：
 
@@ -325,9 +328,9 @@ D:\Anaconda\python.exe -m agentcode user disable bob         # 停用（欠费/�
 | 身份 | SQLite 账号表（`AGENT_DB_PATH`），PBKDF2-SHA256 加盐哈希，不存明文 |
 | 登录态 | HMAC 签名 HttpOnly Cookie（`AGENT_SECRET_KEY`），改一个字符即失效，7 天过期 |
 | 会话隔离 | 每个账号独立目录 `traces/web-sessions/<账号id>/`，看不到也猜不到别人的会话 |
-| 配额 | 按（账号, 日期）累计 token，超额返回 402 并说明原因，次日自动重置 |
-| 限流 | 每人每分钟 `AGENT_RATE_LIMIT_PER_MINUTE`（默认 30）次请求，超出返回 429 并带 `Retry-After` |
-| 并发 | 每人同时最多 `AGENT_MAX_CONCURRENT_RUNS`（默认 2）个任务在跑，多开的请求同样 429 |
+| 配额 | 按（账号, 日期）累计 token，超额返回 402 并说明原因，次日 UTC 零点重置；**上限由套餐决定** |
+| 限流 | 每分钟请求数**由套餐决定**，超出返回 429 并带 `Retry-After` |
+| 并发 | 同时最多几个任务在跑**由套餐决定**，多开的请求同样 429 |
 | 单次预算 | 单次任务超出 `AGENT_RUN_TOKEN_BUDGET`（默认 30000）token 会**中途中断**并说明原因 |
 | 运维 | `/healthz` 免登录探活；每请求一行 JSON 日志（请求 id、用户、路径、状态、耗时） |
 
@@ -336,6 +339,48 @@ D:\Anaconda\python.exe -m agentcode user disable bob         # 停用（欠费/�
 > 本地自用想免登录：`agentcode web --no-auth`（会打印醒目警告）。
 >
 > 登录接口额外限流（每 IP 每分钟 10 次），防止有人拿脚本暴力试探密码。
+
+### 套餐与计费
+
+额度由**套餐**决定，不再由账号上的数字决定。套餐目录在 `agentcode/plans.py`：
+
+| 套餐 | 日 token | 每分钟 | 并发 | 代码执行 | 会话数 | 月价 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `free` 免费 | 2 万 | 10 | 1 | 否 | 5 | 免费 |
+| `basic` 基础 | 20 万 | 30 | 2 | 是 | 20 | ¥29 |
+| `pro` 专业 | 100 万 | 60 | 4 | 是 | 50 | ¥99 |
+| `team` 团队 | 500 万 | 120 | 8 | 是 | 200 | ¥399 |
+| `owner` 内部 | 不限 | 不限 | 不限 | 是 | 不限 | 不可售 |
+
+> **行为变化**：升级到本版本后，账号上原先手工设的每日额度不再生效，额度以套餐为准。
+> 需要给某个人单独提额时用 `agentcode user limit <账号> <token数>`，
+> 它会写成**账号级覆盖**，优先级高于套餐。
+
+**用量账本**：每次运行往 `usage_ledger` 记一条，带运行编号（能追到具体是哪次运行）。
+今日用量、区间用量、历史曲线都从账本汇总，可导出 CSV。老库里的日计数器会在升级时自动搬进账本。
+
+**买套餐**：网页左侧账号栏点「套餐与用量」，可以看到当前套餐、到期时间、额度进度条、近 7 天用量，
+以及套餐卡片。点「升级」会生成一张**待支付**订单——现在只有手动开通这一条渠道。
+
+**管理动作只在命令行**（网页不开放，避免给自己留一条自助提权的路）：
+
+```powershell
+D:\Anaconda\python.exe -m agentcode user plan alice pro --months 3      # 换套餐 / 续期
+D:\Anaconda\python.exe -m agentcode billing orders                      # 看订单（加 --json 给脚本用）
+D:\Anaconda\python.exe -m agentcode billing grant alice basic --months 1  # 收到钱后直接开通
+D:\Anaconda\python.exe -m agentcode billing confirm <订单号> --reference "微信转账 20260929"
+```
+
+续期规则：同一个套餐且没过期，就从原来的到期日往后加；换套餐、或者已经过期，就从今天重新起算。
+`owner` 是内部套餐，永不过期、不可购买。
+
+**支付渠道是可替换的**：实现 `agentcode/billing.py` 里的 `PaymentProvider` 协议
+（`create_order` + `confirm`），就能接微信 / 支付宝 / Stripe；上层业务代码一行都不用改。
+金额一律用「分」存整数，不用浮点。
+
+**数据库迁移**：schema 现在有版本号（`schema_meta`），打开老库会自动升级。
+迁移**只增不改**（加列不删列）、逐条事务、可重复执行。升级时自动备份好 `traces/agentcode.db`
+就不会有风险——真失败了它会整体回滚并把版本停在上一条。
 
 三种打开方式，效果一样：
 
