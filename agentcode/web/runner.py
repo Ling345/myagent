@@ -24,7 +24,7 @@ from agentcode.core.registry import default_registry
 from agentcode.llm.mock import demo_responses_llm
 from agentcode.llm.openai_compatible import OpenAICompatibleLLM
 from agentcode.memory import ShortTermMemory
-from agentcode.middleware import RetryMiddleware, TimeoutMiddleware
+from agentcode.middleware import BudgetMiddleware, RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 from agentcode.tools import (
     ToolRegistry,
@@ -125,6 +125,8 @@ def build_tools(
 def build_middlewares(emit: Emitter, settings: Settings) -> list[Middleware]:
     """组装网页侧的中间件链（顺序即包装顺序，最外层在前）。"""
     return [
+        # 预算放在最外层：超预算的错误不会被重试逻辑反复触发
+        BudgetMiddleware(max_tokens=settings.run_token_budget),
         EventMiddleware(emit),
         RetryMiddleware(max_retries=2, base_delay=0.2),
         TimeoutMiddleware(timeout=settings.timeout),

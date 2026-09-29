@@ -22,6 +22,7 @@ from agentcode.llm.openai_compatible import OpenAICompatibleLLM
 from agentcode.memory import FileSessionStore, JsonStore, ShortTermMemory
 from agentcode.memory.session_store import DEFAULT_SESSION_DIR
 from agentcode.middleware import (
+    BudgetMiddleware,
     LoggingMiddleware,
     RetryMiddleware,
     TimeoutMiddleware,
@@ -225,6 +226,7 @@ def _build_tools(
 def _build_middlewares(settings: Settings, quiet: bool) -> list[Any]:
     """组装默认中间件链（顺序即包装顺序，最外层在前）。"""
     return [
+        BudgetMiddleware(max_tokens=settings.run_token_budget),
         LoggingMiddleware(enabled=not quiet),
         RetryMiddleware(max_retries=2, base_delay=0.2),
         TimeoutMiddleware(timeout=settings.timeout),

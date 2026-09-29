@@ -41,6 +41,11 @@ DEFAULT_CODING_STEPS = 20
 #: 账号与配额（收费产品的地基）
 DEFAULT_DB_PATH = "traces/agentcode.db"
 DEFAULT_DAILY_TOKEN_LIMIT = 50_000
+#: 频率与并发闸门：防止单用户打满服务
+DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+DEFAULT_MAX_CONCURRENT_RUNS = 2
+#: 单次运行的 token 上限（超出中断，避免一个任务吃掉整天额度）
+DEFAULT_RUN_TOKEN_BUDGET = 30_000
 #: 面向公网时默认不允许执行代码；本地 CLI 使用不受影响
 DEFAULT_ALLOW_CODE_TOOLS = False
 
@@ -115,6 +120,9 @@ class Settings:
     db_path: str = DEFAULT_DB_PATH
     secret_key: str | None = None
     daily_token_limit: int = DEFAULT_DAILY_TOKEN_LIMIT
+    rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
+    max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
+    run_token_budget: int = DEFAULT_RUN_TOKEN_BUDGET
     allow_code_tools: bool = DEFAULT_ALLOW_CODE_TOOLS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
@@ -169,6 +177,13 @@ class Settings:
             db_path=str(pick("AGENT_DB_PATH", DEFAULT_DB_PATH)),
             secret_key=pick("AGENT_SECRET_KEY"),
             daily_token_limit=_to_int(pick("AGENT_DAILY_TOKEN_LIMIT"), DEFAULT_DAILY_TOKEN_LIMIT),
+            rate_limit_per_minute=_to_int(
+                pick("AGENT_RATE_LIMIT_PER_MINUTE"), DEFAULT_RATE_LIMIT_PER_MINUTE
+            ),
+            max_concurrent_runs=_to_int(
+                pick("AGENT_MAX_CONCURRENT_RUNS"), DEFAULT_MAX_CONCURRENT_RUNS
+            ),
+            run_token_budget=_to_int(pick("AGENT_RUN_TOKEN_BUDGET"), DEFAULT_RUN_TOKEN_BUDGET),
             allow_code_tools=_to_bool(pick("AGENT_ALLOW_CODE_TOOLS"), DEFAULT_ALLOW_CODE_TOOLS),
             env_file=str(resolved) if resolved else None,
         )
@@ -216,6 +231,9 @@ class Settings:
             "AGENT_CODE_OUTPUT_LIMIT": self.code_output_limit,
             "AGENT_CODING_STEPS": self.coding_steps,
             "AGENT_DAILY_TOKEN_LIMIT": self.daily_token_limit,
+            "AGENT_RATE_LIMIT_PER_MINUTE": self.rate_limit_per_minute,
+            "AGENT_MAX_CONCURRENT_RUNS": self.max_concurrent_runs,
+            "AGENT_RUN_TOKEN_BUDGET": self.run_token_budget,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -240,6 +258,9 @@ class Settings:
             "AGENT_MAX_STEPS": str(self.max_steps),
             "AGENT_CODING_STEPS": str(self.coding_steps),
             "AGENT_DAILY_TOKEN_LIMIT": str(self.daily_token_limit),
+            "AGENT_RATE_LIMIT_PER_MINUTE": str(self.rate_limit_per_minute),
+            "AGENT_MAX_CONCURRENT_RUNS": str(self.max_concurrent_runs),
+            "AGENT_RUN_TOKEN_BUDGET": str(self.run_token_budget),
             "AGENT_ALLOW_CODE_TOOLS": "是" if self.allow_code_tools else "否",
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,

@@ -28,6 +28,11 @@ from agentcode.config import (
 )
 from agentcode.core.registry import default_registry
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
+from agentcode.web.limits import (
+    DEFAULT_MAX_CONCURRENT,
+    DEFAULT_PER_MINUTE,
+    UsageGuard,
+)
 from agentcode.tools import (
     ToolRegistry,
     register_builtin_tools,
@@ -196,9 +201,35 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         self._log_access(status)
 
-    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: int = 200,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._send(status, body, "application/json; charset=utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+        self._log_access(status)
+
+    def _client_key(self) -> str:
+        """限流用的 key：已登录用账号名，未登录用 IP。"""
+        account = getattr(self, "_account", None)
+        if account is not None:
+            return f"user:{account.name}"
+        return f"ip:{self.client_address[0] if self.client_address else 'unknown'}"
+
+    def _reject_by_limit(self, decision: Any) -> None:
+        """统一的 429 回应。"""
+        headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else None
+        self._send_json({"error": decision.reason}, status=429, extra_headers=headers)
 
     def _serve_static(self, name: str) -> None:
         """返回静态文件，并阻止路径穿越。"""
@@ -263,6 +294,11 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         # 其余接口都需要登录
         if path.startswith("/api/") and not self._auth_ok():
             return
+        if path.startswith("/api/"):
+            decision = self.server.guard.check_request(self._client_key())  # type: ignore[attr-defined]
+            if not decision.allowed:
+                self._reject_by_limit(decision)
+                return
         if path == "/api/agents":
             self._send_json(agents_payload(self._settings()))
             return
@@ -358,6 +394,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if payload is None:
                 return
+            # 登录单独限流，防密码暴力试探
+            decision = self.server.login_guard.check_request(  # type: ignore[attr-defined]
+                f"login:{self.client_address[0] if self.client_address else 'unknown'}"
+            )
+            if not decision.allowed:
+                self._reject_by_limit(decision)
+                return
             self._handle_login(payload)
             return
 
@@ -436,6 +479,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": reason}, status=402)
                 return
 
+        # 频率 + 并发闸门：一次任务会调用模型十几次，只在开头查每日额度挡不住并发
+        guard_key = self._client_key()
+        decision = self.server.guard.acquire(guard_key)  # type: ignore[attr-defined]
+        if not decision.allowed:
+            self._reject_by_limit(decision)
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -467,6 +517,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             # 浏览器提前关闭连接（例如用户刷新页面）时静默结束
             pass
+        finally:
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
 
     def _handle_login(self, payload: dict[str, Any]) -> None:
         """校验账号密码并下发签名 cookie。"""
@@ -508,6 +560,8 @@ def create_server(
     secret_key: str | None = None,
     require_auth: bool = True,
     access_log: bool = False,
+    rate_limit_per_minute: int = DEFAULT_PER_MINUTE,
+    max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT,
 ) -> ThreadingHTTPServer:
     """创建（但不启动）网页服务，``port=0`` 时由系统分配端口。
 
@@ -521,6 +575,11 @@ def create_server(
     server.quiet = quiet  # type: ignore[attr-defined]
     server.require_auth = require_auth  # type: ignore[attr-defined]
     server.access_log = access_log  # type: ignore[attr-defined]
+    server.guard = UsageGuard(  # type: ignore[attr-defined]
+        per_minute=rate_limit_per_minute, max_concurrent=max_concurrent_runs
+    )
+    #: 登录接口单独限流（比常规接口更严，防暴力试探）
+    server.login_guard = UsageGuard(per_minute=10, max_concurrent=50)  # type: ignore[attr-defined]
     base_dir = Path(session_dir or default_session_dir())
     server.session_base_dir = base_dir  # type: ignore[attr-defined]
     server.max_sessions = max_sessions  # type: ignore[attr-defined]
@@ -563,6 +622,7 @@ def serve(
 ) -> None:
     """启动网页服务并阻塞，直到用户按 Ctrl+C。"""
     accounts = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    settings_for_limits = Settings.from_env(env_file=env_file)
     boot_password: str | None = None
     if require_auth and not accounts.list():
         # 第一次启动时自动建一个管理员账号，只在这里打印一次密码（类似 Jupyter 的 token）
@@ -581,6 +641,8 @@ def serve(
             accounts=accounts,
             require_auth=require_auth,
             access_log=access_log,
+            rate_limit_per_minute=settings_for_limits.rate_limit_per_minute,
+            max_concurrent_runs=settings_for_limits.max_concurrent_runs,
         )
     except OSError as exc:
         print(f"启动失败：{host}:{port} 无法监听（{exc}）。")
@@ -590,6 +652,11 @@ def serve(
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上不显示模式，一切走这个设置）")
+    print(
+        f"限流：每人每分钟 {settings_for_limits.rate_limit_per_minute} 次请求，"
+        f"同时最多 {settings_for_limits.max_concurrent_runs} 个任务；"
+        f"单次任务 token 预算 {settings_for_limits.run_token_budget}"
+    )
     if require_auth:
         if boot_password:
             print("=" * 56)
