@@ -133,6 +133,24 @@ def build_parser() -> argparse.ArgumentParser:
     passwd_parser.add_argument("--password", default=None, help="不填则自动生成并打印一次")
     usage_parser = user_sub.add_parser("usage", help="查看账号最近用量")
     usage_parser.add_argument("name", nargs="?", help="不填则列出全部账号")
+    plan_parser = user_sub.add_parser("plan", help="切换账号套餐（会延长期限）")
+    plan_parser.add_argument("name")
+    plan_parser.add_argument("plan", help="free / basic / pro / team / owner")
+    plan_parser.add_argument("--months", type=int, default=1, help="有效月数，默认 1")
+
+    billing_parser = subparsers.add_parser("billing", help="订单与开通（收费相关）")
+    billing_sub = billing_parser.add_subparsers(dest="billing_command", required=True)
+    orders_parser = billing_sub.add_parser("orders", help="列出订单")
+    orders_parser.add_argument("--account", default=None, help="只看某个账号")
+    orders_parser.add_argument("--limit", type=int, default=20)
+    orders_parser.add_argument("--json", action="store_true", help="以 JSON 输出")
+    grant_parser = billing_sub.add_parser("grant", help="直接开通/续期，不经过订单")
+    grant_parser.add_argument("name")
+    grant_parser.add_argument("plan")
+    grant_parser.add_argument("--months", type=int, default=1)
+    confirm_parser = billing_sub.add_parser("confirm", help="确认到账并开通")
+    confirm_parser.add_argument("order_id")
+    confirm_parser.add_argument("--reference", default=None, help="支付流水备注")
 
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与工具")
     list_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
@@ -410,6 +428,23 @@ def _user_command(args: argparse.Namespace) -> int:
             print(f"新密码：{password}（只显示这一次）")
         return 0 if changed else 1
 
+    if command == "plan":
+        from agentcode.billing import BillingService
+        from agentcode.core.errors import AgentCodeError
+
+        account = store.get(args.name)
+        if account is None:
+            print(f"错误：没有这个账号：{args.name}")
+            return 2
+        try:
+            refreshed = BillingService(store).grant(account, args.plan, args.months)
+        except AgentCodeError as exc:
+            print(f"错误：{exc}")
+            return 2
+        expires = refreshed.plan_expires_at or "不过期"
+        print(f"已把 {refreshed.name} 设为套餐 {refreshed.plan}，到期时间：{expires}")
+        return 0
+
     # usage
     if args.name:
         account = store.get(args.name)
@@ -426,6 +461,64 @@ def _user_command(args: argparse.Namespace) -> int:
         for row in store.usage_history(account.id, limit=7):
             print(f"   {row['day']}  {row['tokens']} token / {row['calls']} 次")
     return 0
+
+
+def _billing_command(args: argparse.Namespace) -> int:
+    """执行 billing 子命令：看订单、确认到账、直接开通。
+
+    这些动作**只在命令行**开放，网页上不给接口——否则等于给自己留了一条
+    自助提权的路。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.billing import BillingService
+    from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.core.errors import AgentCodeError
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    billing = BillingService(store)
+    command = args.billing_command
+
+    if command == "orders":
+        orders = store.list_orders(args.account, args.limit)
+        if args.json:
+            print(json.dumps({"orders": orders}, ensure_ascii=False))
+            return 0
+        if not orders:
+            print("（还没有订单）")
+            return 0
+        for order in orders:
+            amount = order["amount_cents"] / 100
+            print(
+                f"{order['created_at']}  {order['id']}  {order['plan']} x{order['months']}  "
+                f"{amount:.2f} {order['currency']}  [{order['status']}]"
+            )
+        return 0
+
+    if command == "grant":
+        account = store.get(args.name)
+        if account is None:
+            print(f"错误：没有这个账号：{args.name}")
+            return 2
+        try:
+            refreshed = billing.grant(account, args.plan, args.months)
+        except AgentCodeError as exc:
+            print(f"错误：{exc}")
+            return 2
+        expires = refreshed.plan_expires_at or "不过期"
+        print(f"已把 {refreshed.name} 设为套餐 {refreshed.plan}，到期时间：{expires}")
+        return 0
+
+    if command == "confirm":
+        try:
+            order = billing.confirm(args.order_id, args.reference)
+        except AgentCodeError as exc:
+            print(f"错误：{exc}")
+            return 2
+        print(f"订单 {order.id} 已确认到账，套餐 {order.plan} 生效 {order.months} 个月。")
+        return 0
+
+    print("错误：未知的 billing 子命令。")
+    return 2
 
 
 def _web_command(args: argparse.Namespace) -> int:
@@ -509,6 +602,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "user":
             return _user_command(args)
+
+        if args.command == "billing":
+            return _billing_command(args)
 
         return _run_command(args)
     except ConfigError as exc:
