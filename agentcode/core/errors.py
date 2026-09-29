@@ -20,6 +20,10 @@ class LLMError(AgentCodeError):
     """调用大语言模型失败。"""
 
 
+class MigrationError(AgentCodeError):
+    """数据库迁移失败（库已被回滚，可以安全重试）。"""
+
+
 class ToolError(AgentCodeError):
     """工具注册或调用出现无法就地恢复的问题。"""
 
