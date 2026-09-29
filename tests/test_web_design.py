@@ -13,6 +13,39 @@ def _css() -> str:
     return (STATIC_DIR / "style.css").read_text(encoding="utf-8")
 
 
+def _js() -> str:
+    return (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------ 套餐与用量面板
+
+
+def test_billing_panel_exists_in_markup():
+    html = _html()
+    assert 'id="billing-panel"' in html
+    assert 'id="billing-toggle"' in html
+    assert 'id="billing-bar-fill"' in html
+    assert 'id="billing-orders"' in html
+
+
+def test_billing_panel_is_hidden_until_opened():
+    """面板默认收起——主界面只给结果，这是既有约定。"""
+    css = " ".join(_css().split())
+    assert "#billing-panel[hidden] { display: none; }" in css
+
+
+def test_billing_panel_script_uses_the_new_endpoints():
+    js = _js()
+    assert "/api/billing" in js
+    assert "/api/plans" in js
+    assert "/api/billing/checkout" in js
+
+
+def test_account_quota_shows_unlimited():
+    js = _js()
+    assert "unlimited" in js
+
+
 def test_page_has_flowing_background_layer():
     assert 'class="flow"' in _html()
     assert "drift-a" in _css()
