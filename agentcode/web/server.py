@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
@@ -28,6 +29,7 @@ from agentcode.config import (
 )
 from agentcode.core.registry import default_registry
 from agentcode.core.errors import AgentCodeError
+from agentcode.metrics import HTTP_REQUESTS, HTTP_SECONDS, METRICS, REJECTIONS
 from agentcode.plans import get_plan
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
 from agentcode.web.limits import (
@@ -61,6 +63,55 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".json": "application/json; charset=utf-8",
 }
+
+
+#: 指标里只保留这些路径，其余归到 other——
+#: 否则有人拿随机 URL 扫站就能把标签基数撑爆，把内存吃掉
+METRIC_PATHS = frozenset(
+    {
+        "/",
+        "/healthz",
+        "/metrics",
+        "/api/login",
+        "/api/logout",
+        "/api/me",
+        "/api/agents",
+        "/api/config",
+        "/api/sessions",
+        "/api/session",
+        "/api/sessions/create",
+        "/api/sessions/rename",
+        "/api/sessions/delete",
+        "/api/session/reset",
+        "/api/file",
+        "/api/run",
+        "/api/run/stream",
+        "/api/runs",
+        "/api/plans",
+        "/api/billing",
+        "/api/billing/checkout",
+    }
+)
+
+
+def metric_path_label(path: str) -> str:
+    """把请求路径收敛成有限的几个取值。"""
+    if path in METRIC_PATHS:
+        return path
+    if path.startswith("/static/"):
+        return "/static"
+    return "other"
+
+
+def is_loopback_host(host: str) -> bool:
+    """这个监听地址是不是只能本机访问。"""
+    text = str(host or "").strip()
+    if text in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
 
 
 def scope_settings_for_plan(settings: Settings, plan_name: str | None) -> Settings:
@@ -170,7 +221,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         return account if account and account.is_active else None
 
     def _log_access(self, status: int) -> None:
-        """输出一行 JSON 访问日志：请求 id、用户、路径、状态、耗时。"""
+        """记一次请求。
+
+        **指标一定要记**（跟访问日志开关无关），JSON 日志看配置。
+        """
+        elapsed_ms = (
+            time.perf_counter() - getattr(self, "_started", time.perf_counter())
+        ) * 1000
+        bucket = metric_path_label(self.path.split("?", 1)[0])
+        HTTP_REQUESTS.inc(path=bucket, status=str(status))
+        HTTP_SECONDS.observe(elapsed_ms / 1000, path=bucket)
+
         if not getattr(self.server, "access_log", False):
             return
         account = getattr(self, "_account", None)
@@ -180,7 +241,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "method": self.command or "-",
             "path": self.path.split("?", 1)[0],
             "status": status,
-            "ms": round((time.perf_counter() - getattr(self, "_started", time.perf_counter())) * 1000, 1),
+            "ms": round(elapsed_ms, 1),
             "user": account.name if account else "",
             "ip": self.client_address[0] if self.client_address else "",
         }
@@ -201,6 +262,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return True  # 免登录模式（本地自用）
         if getattr(self, "_account", None) is not None:
             return True
+        REJECTIONS.inc(reason="unauthorized")
         self._send_json({"error": "请先登录。"}, status=401)
         return False
 
@@ -246,6 +308,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
     def _reject_by_limit(self, decision: Any) -> None:
         """统一的 429 回应。"""
+        reason = "concurrency" if "任务在运行" in str(decision.reason) else "rate_limit"
+        REJECTIONS.inc(reason=reason)
         headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else None
         self._send_json({"error": decision.reason}, status=429, extra_headers=headers)
 
@@ -258,6 +322,26 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
     def _billing(self) -> Any:
         """当前服务进程的账单服务（套餐、订单、用量）。"""
         return self.server.billing  # type: ignore[attr-defined]
+
+    def _serve_metrics(self) -> None:
+        """暴露 Prometheus 文本格式的指标。
+
+        绑在回环地址上（本地自用）不要求登录，方便直接 curl；
+        一旦监听到别处就必须登录——指标里带着请求路径、账号名和
+        key 的脱敏指纹，不该对公网敞开。
+        """
+        if not is_loopback_host(getattr(self.server, "bind_host", "127.0.0.1")):
+            if not self._auth_ok():
+                return
+        body = METRICS.render().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self._log_access(200)
 
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
@@ -385,6 +469,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
+            return
+        if path == "/metrics":
+            self._serve_metrics()
             return
         if path == "/api/me":
             account = getattr(self, "_account", None)
@@ -624,6 +711,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if account is not None:
             allowed, reason = accounts.check_quota(account)
             if not allowed:
+                REJECTIONS.inc(reason="quota")
                 self._send_json({"error": reason}, status=402)
                 return
         # 套餐收口：免费套餐不允许执行代码时，连工具都不下发给模型
@@ -687,6 +775,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         account = accounts.verify(name, password)
         if account is None:
             # 不区分"账号不存在"与"密码错误"，避免账号枚举
+            REJECTIONS.inc(reason="bad_credentials")
             self._send_json({"error": "账号或密码不正确。"}, status=401)
             return
 
@@ -734,6 +823,8 @@ def create_server(
     server.quiet = quiet  # type: ignore[attr-defined]
     server.require_auth = require_auth  # type: ignore[attr-defined]
     server.access_log = access_log  # type: ignore[attr-defined]
+    #: 监听地址决定 /metrics 要不要登录（回环地址才免登录）
+    server.bind_host = host  # type: ignore[attr-defined]
     server.guard = UsageGuard(  # type: ignore[attr-defined]
         per_minute=rate_limit_per_minute, max_concurrent=max_concurrent_runs
     )
