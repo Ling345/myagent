@@ -141,6 +141,12 @@
             ></textarea>
             <button type="submit" id="send-button" class="send" aria-label="运行">↑</button>
           </div>
+          <div class="upload-row">
+            <button type="button" id="upload-button" class="upload-button">上传文件</button>
+            <span class="upload-hint">也可以把文件直接拖到这里</span>
+            <input type="file" id="upload-input" multiple hidden />
+          </div>
+          <div id="upload-chips" class="upload-chips" hidden></div>
           <p id="run-status" class="composer-hint" role="status" aria-live="polite"></p>
         </form>
       </main>

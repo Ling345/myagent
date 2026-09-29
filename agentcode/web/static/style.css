@@ -974,6 +974,68 @@ button:disabled {
 
 /* ---------------------------------------------------------- 套餐与用量面板 */
 
+/* ------------------------------------------------------------ 上传文件 */
+
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-left: 4px;
+}
+
+.upload-button {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.upload-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.upload-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.composer.is-dropping .composer-box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.upload-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.upload-chips[hidden] {
+  display: none;
+}
+
+.upload-chip {
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.upload-chip:hover {
+  border-color: var(--accent);
+}
+
 /* 默认收起：主界面只给结果，这是既有约定 */
 #billing-panel[hidden] { display: none; }
 

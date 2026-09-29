@@ -95,6 +95,37 @@ def test_resizer_is_hidden_on_narrow_screens():
     assert ".sidebar-resizer { display: none; }" in narrow
 
 
+# ------------------------------------------------------------ 上传文件
+
+
+def test_upload_controls_exist_in_markup():
+    html = _html()
+    assert 'id="upload-button"' in html
+    assert 'id="upload-input"' in html
+    assert 'id="upload-chips"' in html
+    assert 'type="file"' in html
+
+
+def test_upload_script_uses_the_endpoint_and_supports_drop():
+    js = _js()
+    assert "/api/upload?path=" in js
+    assert "uploadFiles" in js
+    assert "dragover" in js
+    assert "drop" in js
+
+
+def test_upload_chip_opens_the_existing_viewer():
+    """上传后点标签就能看内容，复用已有的查看器，不另造一个。"""
+    js = _js()
+    assert "addUploadChip" in js
+    assert "openViewer(path, bytes)" in js
+
+
+def test_upload_chips_are_hidden_until_something_is_uploaded():
+    css = " ".join(_css().split())
+    assert ".upload-chips[hidden] { display: none; }" in css
+
+
 def test_page_has_flowing_background_layer():
     assert 'class="flow"' in _html()
     assert "drift-a" in _css()
