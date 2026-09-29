@@ -189,3 +189,40 @@ def test_keypool_success_resets_but_keeps_the_trip_count():
     assert state.failures == 0
     # 熔断次数是"一共发生过几次"，不会因为恢复就归零
     assert 'agentcode_keypool_trips_total{key="0"} 1.0' in _rendered()
+
+
+# ------------------------------------------------------------------ 沙箱执行
+
+
+def test_local_sandbox_success_is_counted(tmp_path):
+    from agentcode.tools.sandbox import LocalBackend
+
+    LocalBackend(tmp_path).run("print(1)", 5)
+
+    text = _rendered()
+    assert 'agentcode_sandbox_runs_total{backend="local",result="ok"} 1.0' in text
+    assert 'agentcode_sandbox_seconds_count{backend="local"} 1' in text
+
+
+def test_sandbox_failure_is_counted(tmp_path):
+    from agentcode.tools.sandbox import LocalBackend
+
+    LocalBackend(tmp_path).run("raise SystemError('炸')", 5)
+    assert 'agentcode_sandbox_runs_total{backend="local",result="failed"} 1.0' in _rendered()
+
+
+def test_sandbox_timeout_is_counted_separately(tmp_path):
+    """超时和"代码自己报错"是两回事：超时通常意味着模型写了个死循环。"""
+    from agentcode.tools.sandbox import LocalBackend
+
+    LocalBackend(tmp_path).run("while True: pass", 0.5)
+    assert 'agentcode_sandbox_runs_total{backend="local",result="timeout"} 1.0' in _rendered()
+
+
+def test_unavailable_docker_is_counted_as_error(tmp_path):
+    from agentcode.tools.sandbox import DockerBackend, ExecutionError
+
+    backend = DockerBackend(tmp_path, docker_executable="definitely-not-a-docker")
+    with pytest.raises(ExecutionError):
+        backend.run("print(1)", 5)
+    assert 'agentcode_sandbox_runs_total{backend="docker",result="error"} 1.0' in _rendered()
