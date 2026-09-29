@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
+from agentcode.metrics import RUNS, RUN_SECONDS
+
 Event = dict[str, Any]
 #: 造一个事件流出来（通常是 ``run_stream(...)`` 的结果）
 StreamFactory = Callable[[], Iterator[Event]]
@@ -67,6 +69,19 @@ class RunRecord:
             if event.get("type") == "answer":
                 return event
         return None
+
+    def outcome(self) -> str:
+        """这次运行的结果：ok / error / empty。
+
+        指标按这个分类：``empty`` 表示流结束了却没有 answer，通常意味着
+        跑到步数上限或者被中途掐断——它值得单独看一眼，不该混进 error。
+        """
+        with self.condition:
+            if any(event.get("type") == "answer" for event in self.events):
+                return "ok"
+            if any(event.get("type") == "error" for event in self.events):
+                return "error"
+            return "empty"
 
     def summary(self) -> dict[str, Any]:
         """给接口用的状态摘要（不含事件正文）。"""
@@ -232,6 +247,9 @@ class RunRegistry:
             record.finished = True
             record.finished_at = time.monotonic()
             record.condition.notify_all()
+        duration = (record.finished_at or time.monotonic()) - record.started_at
+        RUNS.inc(agent=record.agent, result=record.outcome())
+        RUN_SECONDS.observe(duration, agent=record.agent)
         if on_finish is not None:
             try:
                 on_finish(record)
