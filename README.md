@@ -1,5 +1,7 @@
 # AgentCode：可扩展的 Python 智能体框架
 
+[![CI](https://github.com/Ling345/myagent/actions/workflows/ci.yml/badge.svg)](https://github.com/Ling345/myagent/actions/workflows/ci.yml)
+
 > **软件工程 · Homework 1（Code Agent）**：本项目的作业方向是**测试生成 Agent**——
 > 为指定源码生成 pytest 用例，并**真的跑通**（生成 → 运行 → 读报错 → 修正 → 全绿）。
 > 设计说明与评分点对照见 [Design.md](Design.md)。
@@ -208,6 +210,30 @@ wsl -d Ubuntu -- docker run --rm --network none --read-only --user 65534:65534 `
 | `AGENT_DOCKER_CPUS` | `0.5` | 容器 CPU 上限 |
 | `AGENT_DOCKER_PIDS_LIMIT` | `64` | 容器内进程数上限 |
 | `AGENT_DOCKER_USER` | `65534:65534` | 容器内运行用户；留空则用镜像默认用户 |
+
+## 多 key 轮换与熔断
+
+单把 key 是**单点故障**：额度打满、被限流、被风控，整个服务立刻不可用。所以支持一次配多把：
+
+```dotenv
+# 只有一把 key 时填这个（老配置不用改）
+LLM_API_KEY=sk-aaa
+# 有多把 key 时填这个，逗号或换行分隔；配了它就以它为准
+LLM_API_KEYS=sk-aaa,sk-bbb,sk-ccc
+```
+
+行为：
+
+| 机制 | 说明 |
+| --- | --- |
+| 轮换 | 请求在多把 key 之间轮流用，不会把某一把打爆 |
+| 熔断 | 某把 key 连续失败 `AGENT_KEY_FAILURE_THRESHOLD`（默认 3）次就临时摘掉 |
+| 恢复 | 冷却 `AGENT_KEY_COOLDOWN_SECONDS`（默认 60）秒后自动放回池子，成功一次就彻底复位 |
+| 智能重试 | 限流/额度/失效/5xx 会换下一把 key 接着试；400/422 这种"我们自己请求写错了"不换 |
+| 兜底提示 | 全部 key 都在冷却时，报错里会带上"最快多少秒后恢复" |
+
+想看当前状态，跑 `D:\Anaconda\python.exe -m agentcode config`——
+它只打印脱敏后的 key 摘要，不会泄露明文。
 
 ## 上下文记忆
 
@@ -456,6 +482,7 @@ def add(a: str, b: str) -> str:
 | 环境变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `LLM_API_KEY` | 是 | 无 | 模型服务密钥 |
+| `LLM_API_KEYS` | 否 | 无 | 多把模型密钥（逗号/换行分隔），配了就覆盖 `LLM_API_KEY` |
 | `LLM_BASE_URL` | 是 | 无 | 兼容 OpenAI 的接口地址 |
 | `LLM_MODEL_ID` | 是 | 无 | 模型名称 |
 | `LLM_TIMEOUT` | 否 | `60` | 单次调用超时（秒） |
@@ -477,6 +504,8 @@ def add(a: str, b: str) -> str:
 | `AGENT_DOCKER_CPUS` | 否 | `0.5` | 容器 CPU 上限 |
 | `AGENT_DOCKER_PIDS_LIMIT` | 否 | `64` | 容器内进程数上限 |
 | `AGENT_DOCKER_USER` | 否 | `65534:65534` | 容器内运行用户，留空则不传 `--user` |
+| `AGENT_KEY_FAILURE_THRESHOLD` | 否 | `3` | 某把 key 连续失败几次就被熔断 |
+| `AGENT_KEY_COOLDOWN_SECONDS` | 否 | `60` | 熔断冷却多少秒后自动放回 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖上面的数值型字段，
@@ -488,6 +517,18 @@ def add(a: str, b: str) -> str:
 ```powershell
 D:\Anaconda\python.exe -m pytest -q
 ```
+
+全部用例都是**离线**的：不打真实模型、不联网搜索，所以随便跑。
+
+推上去之后 GitHub Actions 会自动跑（见 `.github/workflows/ci.yml`）：
+
+| 任务 | 内容 |
+| --- | --- |
+| 测试 | `ubuntu-latest` × Python 3.10/3.13，外加 `windows-latest` × Python 3.13 |
+| 沙箱镜像 | 真的构建 `docker/sandbox/Dockerfile`，并断言容器里非 root、断网、只读根、pytest 可用 |
+
+之所以要跑 3.10：`pyproject.toml` 里声明了 `requires-python = ">=3.10"`，
+声明了就得有人真的替你测，不然迟早变成一句谎话。
 
 285 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度。覆盖重点：
 

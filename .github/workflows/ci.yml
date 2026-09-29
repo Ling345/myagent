@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: 测试（${{ matrix.os }} / Python ${{ matrix.python-version }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个组合挂了也要看得到其它组合的结果
+      fail-fast: false
+      matrix:
+        include:
+          # 声明的 requires-python 下限，得真的有人测
+          - os: ubuntu-latest
+            python-version: "3.10"
+          # 生产环境会是 Linux，跑一遍全量
+          - os: ubuntu-latest
+            python-version: "3.13"
+          # 开发机是 Windows，别只在 Linux 上绿
+          - os: windows-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 测试全部离线：不打真实模型、不联网搜索
+      - name: 跑测试
+        run: python -m pytest -q -p no:warnings
+
+  sandbox-image:
+    name: 构建代码执行沙箱镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建镜像
+        run: docker build -t agentcode-sandbox:ci docker/sandbox
+
+      # 确认镜像真的能当沙箱用：非 root、断网、只读根、pytest 可用
+      - name: 沙箱自检
+        run: |
+          docker run --rm --network none --read-only --user 65534:65534 \
+            --tmpfs /tmp:size=32m agentcode-sandbox:ci \
+            python -c "import os, pytest; assert os.getuid() == 65534; print('sandbox ok, pytest', pytest.__version__)"
