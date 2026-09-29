@@ -382,6 +382,115 @@ class AccountStore:
                 (account_id, day or _today()),
             )
 
+    # ------------------------------------------------------------------ 订单
+
+    #: 订单表的列，顺序与 INSERT 一致
+    ORDER_FIELDS = (
+        "id",
+        "account_id",
+        "plan",
+        "months",
+        "amount_cents",
+        "currency",
+        "status",
+        "provider",
+        "provider_ref",
+        "created_at",
+        "paid_at",
+        "note",
+    )
+
+    def create_order(
+        self,
+        account_id: str,
+        plan: str,
+        months: int,
+        amount_cents: int,
+        currency: str,
+        *,
+        provider: str,
+    ) -> dict[str, object]:
+        """落一条待支付订单。"""
+        record: dict[str, object] = {
+            "id": uuid.uuid4().hex[:12],
+            "account_id": account_id,
+            "plan": plan,
+            "months": int(months),
+            "amount_cents": int(amount_cents),
+            "currency": currency,
+            "status": "pending",
+            "provider": provider,
+            "provider_ref": None,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "paid_at": None,
+            "note": None,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO orders (id, account_id, plan, months, amount_cents, currency,"
+                " status, provider, provider_ref, created_at, paid_at, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tuple(record[field] for field in self.ORDER_FIELDS),
+            )
+        return record
+
+    @classmethod
+    def _row_to_order(cls, row: sqlite3.Row) -> dict[str, object]:
+        return {field: row[field] for field in cls.ORDER_FIELDS}
+
+    def get_order(self, order_id: str) -> dict[str, object] | None:
+        """按订单号取订单。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM orders WHERE id = ?", (str(order_id or ""),)
+            ).fetchone()
+        return self._row_to_order(row) if row else None
+
+    def list_orders(self, account_id: str | None = None, limit: int = 50) -> list[dict]:
+        """列订单；不给 account_id 就列全部（管理员用）。"""
+        with self._lock:
+            if account_id is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM orders ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM orders WHERE account_id = ?"
+                    " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (account_id, max(1, int(limit))),
+                ).fetchall()
+        return [self._row_to_order(row) for row in rows]
+
+    def mark_order_paid(
+        self, order_id: str, *, provider_ref: str | None = None
+    ) -> dict[str, object] | None:
+        """把待支付订单标成已支付。
+
+        只在 ``status='pending'`` 时才改；返回 ``None`` 表示**没有发生状态迁移**
+        （已经支付过，或者被取消/退款了）——billing 靠这个保证订单只开通一次。
+        """
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE orders SET status = 'paid', paid_at = ?,"
+                " provider_ref = COALESCE(?, provider_ref)"
+                " WHERE id = ? AND status = 'pending'",
+                (now, provider_ref, str(order_id or "")),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_order(order_id)
+
+    def set_order_status(self, order_id: str, status: str, *, note: str | None = None) -> bool:
+        """改订单状态（取消 / 退款标记）。"""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE orders SET status = ?, note = COALESCE(?, note) WHERE id = ?",
+                (status, note, str(order_id or "")),
+            )
+        return cursor.rowcount > 0
+
     def close(self) -> None:
         """关闭数据库连接。"""
         with self._lock:
