@@ -33,6 +33,7 @@ from agentcode.web.limits import (
     DEFAULT_PER_MINUTE,
     UsageGuard,
 )
+from agentcode.web.runs import RunRegistry
 from agentcode.tools import (
     ToolRegistry,
     register_builtin_tools,
@@ -231,6 +232,86 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         headers = {"Retry-After": str(decision.retry_after)} if decision.retry_after else None
         self._send_json({"error": decision.reason}, status=429, extra_headers=headers)
 
+    # -------------------------------------------------------------- 运行状态
+
+    def _registry(self) -> RunRegistry:
+        """当前服务进程的运行注册表。"""
+        return self.server.registry  # type: ignore[attr-defined]
+
+    def _may_access_run(self, record: Any) -> bool:
+        """登录模式下只能看自己的运行；免登录模式不设限。"""
+        if not getattr(self.server, "require_auth", True):
+            return True
+        account = getattr(self, "_account", None)
+        if account is None:
+            return False
+        return record.account_id in (None, account.id)
+
+    def _begin_sse(self) -> None:
+        """开始一条 SSE 响应。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _write_event(self, event: dict[str, Any]) -> None:
+        """按 SSE 协议写一条事件并立刻冲刷。"""
+        chunk = (
+            f"event: {event['type']}\n"
+            f"data: {json.dumps(event.get('data') or {}, ensure_ascii=False)}\n\n"
+        )
+        self.wfile.write(chunk.encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_run(self, record: Any, from_index: int = 0) -> None:
+        """把某个运行的事件流出去。
+
+        浏览器断开只会让**这条订阅**结束，运行本身在注册表里继续跑，
+        重新连上来（``/api/run/stream``）就能把漏掉的事件补回来。
+        """
+        self._begin_sse()
+        try:
+            self._write_event({"type": "run", "data": record.summary()})
+            for event in self._registry().subscribe(record, from_index):
+                self._write_event(event)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self._log_access(200)
+
+    def _serve_runs(self) -> None:
+        """列出运行记录；带 ``session_id`` 时只看这个会话。"""
+        query = parse_qs(urlsplit(self.path).query)
+        session_id = (query.get("session_id") or [""])[0]
+        account = getattr(self, "_account", None)
+        runs = self._registry().list(
+            session_id=session_id or None,
+            account_id=account.id if account is not None else None,
+        )
+        self._send_json({"runs": runs})
+
+    def _serve_run_resume(self) -> None:
+        """重连：从指定下标继续把某个运行的事件流出去。"""
+        query = parse_qs(urlsplit(self.path).query)
+        run_id = (query.get("run_id") or [""])[0]
+        try:
+            from_index = max(0, int((query.get("from") or ["0"])[0]))
+        except (TypeError, ValueError):
+            from_index = 0
+
+        record = self._registry().get(run_id)
+        if record is None:
+            self._send_json(
+                {"error": "找不到这个运行，它可能已经结束很久、记录被回收了。"}, status=404
+            )
+            return
+        if not self._may_access_run(record):
+            self._send_json({"error": "无权访问这个运行。"}, status=403)
+            return
+        self._stream_run(record, from_index)
+
     def _serve_static(self, name: str) -> None:
         """返回静态文件，并阻止路径穿越。"""
         target = (STATIC_DIR / name).resolve()
@@ -324,6 +405,12 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/file":
             self._serve_code_file()
+            return
+        if path == "/api/runs":
+            self._serve_runs()
+            return
+        if path == "/api/run/stream":
+            self._serve_run_resume()
             return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
@@ -486,15 +573,20 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._reject_by_limit(decision)
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        def on_finish(finished: Any) -> None:
+            """运行结束时的收尾：结算用量、放掉并发闸门。
 
-        try:
-            for event in run_stream(
+            挂在这里而不是请求循环里——用户刷新页面把连接掐了，
+            额度照样要扣，闸门也照样要放，不然这个用户就被自己锁死了。
+            """
+            if account is not None:
+                answer = finished.answer_event() or {}
+                usage = (answer.get("data") or {}).get("usage") or {}
+                accounts.record_usage(account.id, int(usage.get("total_tokens") or 0), calls=1)
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+
+        record = self._registry().start(
+            lambda: run_stream(
                 agent_name,
                 task,
                 llm_mode=llm_mode,
@@ -502,23 +594,15 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 settings=settings,
                 session_store=session_store,
                 session_id=session_id,
-            ):
-                chunk = (
-                    f"event: {event['type']}\n"
-                    f"data: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
-                )
-                self.wfile.write(chunk.encode("utf-8"))
-                self.wfile.flush()
-                if event["type"] == "answer" and account is not None:
-                    usage = (event["data"] or {}).get("usage") or {}
-                    accounts.record_usage(
-                        account.id, int(usage.get("total_tokens") or 0), calls=1
-                    )
-        except (BrokenPipeError, ConnectionResetError):
-            # 浏览器提前关闭连接（例如用户刷新页面）时静默结束
-            pass
-        finally:
-            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+            ),
+            agent=agent_name,
+            task=task,
+            session_id=session_id,
+            account_id=account.id if account is not None else None,
+            on_finish=on_finish,
+        )
+        # 首帧就把 run_id 交给前端：连接断了它能凭这个从断点续上
+        self._stream_run(record)
 
     def _handle_login(self, payload: dict[str, Any]) -> None:
         """校验账号密码并下发签名 cookie。"""
@@ -580,6 +664,8 @@ def create_server(
     )
     #: 登录接口单独限流（比常规接口更严，防暴力试探）
     server.login_guard = UsageGuard(per_minute=10, max_concurrent=50)  # type: ignore[attr-defined]
+    #: 运行注册表：让任务的生命周期独立于浏览器的连接（刷新/断网都能续上）
+    server.registry = RunRegistry()  # type: ignore[attr-defined]
     base_dir = Path(session_dir or default_session_dir())
     server.session_base_dir = base_dir  # type: ignore[attr-defined]
     server.max_sessions = max_sessions  # type: ignore[attr-defined]

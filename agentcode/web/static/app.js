@@ -37,9 +37,19 @@ const state = {
   running: false,
   timer: null,
   memorySessionId: null,
+  //: 当前这次运行的服务端编号，断线重连时凭它续上
+  runId: null,
+  //: 已经收到多少条运行事件（等于服务端的绝对事件下标）
+  eventCount: 0,
+  //: 本次运行是否已经拿到最终结果（answer/error）
+  settled: false,
   //: 是否跟随最新消息（用户往上翻看历史时置为 false，翻回底部再恢复）
   followTail: true,
 };
+
+//: 断线后最多重连几次、每次等多久（毫秒，按次数递增）
+const MAX_RESUME_ATTEMPTS = 5;
+const RESUME_BACKOFF_MS = 700;
 
 function escapeHtml(value) {
   return String(value ?? "").replace(
@@ -317,6 +327,42 @@ async function selectSession(sessionId) {
   const turns = countTurns(payload.messages || []);
   updateHeader(turns, payload.session.turns || turns, payload.session.name);
   els.runStatus.textContent = "";
+  // 这个会话可能还有一次任务在服务端跑着（比如刚才刷新过页面），接上去继续看
+  await attachRunningRun(payload.session.id);
+}
+
+/**
+ * 会话里如果有还没跑完的运行，直接接上去继续看。
+ *
+ * 这正是"断线续传"里"刷新页面"那一半：任务从来没停过，
+ * 只是浏览器把连接丢了，重新订阅一下就能看到结果。
+ */
+async function attachRunningRun(sessionId) {
+  let payload;
+  try {
+    payload = await (await fetch(`/api/runs?session_id=${encodeURIComponent(sessionId)}`)).json();
+  } catch (error) {
+    return;
+  }
+  const running = (payload.runs || []).find((run) => run.status === "running");
+  if (!running) return;
+
+  state.runId = running.id;
+  state.eventCount = 0;
+  state.settled = false;
+  const pending = appendPending();
+  setRunning(true);
+  startProgressTimer(performance.now());
+  els.runStatus.textContent = "这个会话还有任务在跑，正在接上…";
+  try {
+    await streamWithResume(null, pending);
+  } catch (error) {
+    failPending(pending, `接上运行失败：${error.message}`);
+  } finally {
+    stopProgressTimer();
+    setRunning(false);
+    refreshAccount();
+  }
 }
 
 function startRename(row, session) {
@@ -583,23 +629,14 @@ async function submitRun(event) {
   els.task.value = "";
   autoGrow();
   const pending = appendPending();
+  state.runId = null;
+  state.eventCount = 0;
+  state.settled = false;
   setRunning(true);
   startProgressTimer(performance.now());
 
   try {
-    const response = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      const detail = await response.json().catch(() => ({}));
-      failPending(pending, detail.error || `服务返回了 ${response.status}。`);
-      return;
-    }
-
-    await readEventStream(response, pending, sessionId);
+    await streamWithResume(payload, pending);
   } catch (error) {
     failPending(pending, `无法连接本地服务：${error.message}`);
   } finally {
@@ -608,6 +645,69 @@ async function submitRun(event) {
     refreshAccount();
     els.task.focus();
   }
+}
+
+/**
+ * 跑一次任务，并在连接断掉时自动续上。
+ *
+ * 服务端把运行的状态放在注册表里，连接只是订阅者：刷新页面、
+ * 网络抖一下都不会让任务白跑，重新连上用 from 下标就能把漏掉的事件补回来。
+ */
+async function streamWithResume(payload, pending) {
+  // 已经知道 run_id 说明是"接上一次运行"，否则才是新开一次
+  let first = !state.runId;
+  let attempts = 0;
+
+  while (true) {
+    let response;
+    try {
+      response = first
+        ? await fetch("/api/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          })
+        : await fetch(
+            `/api/run/stream?run_id=${encodeURIComponent(state.runId)}&from=${state.eventCount}`
+          );
+    } catch (error) {
+      if (!(await waitBeforeResume(pending, attempts))) {
+        failPending(pending, `无法连接本地服务：${error.message}`);
+        return;
+      }
+      attempts += 1;
+      continue;
+    }
+    first = false;
+
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      failPending(pending, detail.error || `服务返回了 ${response.status}。`);
+      return;
+    }
+
+    const outcome = await readEventStream(response, pending);
+    if (outcome === "ended" && state.settled) return;
+
+    // 连接断了、或者断在了半路：只要知道 run_id 就还能续
+    if (!state.runId) {
+      failPending(pending, "连接中断，而且没拿到运行编号，无法续传。");
+      return;
+    }
+    if (!(await waitBeforeResume(pending, attempts))) {
+      failPending(pending, "连接反复中断，已放弃续传；任务在服务端仍会跑完。");
+      return;
+    }
+    attempts += 1;
+  }
+}
+
+/** 重连前的等待与次数控制；返回 false 表示不该再试了。 */
+async function waitBeforeResume(pending, attempts) {
+  if (attempts >= MAX_RESUME_ATTEMPTS) return false;
+  els.runStatus.textContent = `连接中断，正在重连…（第 ${attempts + 1} 次）`;
+  await new Promise((resolve) => setTimeout(resolve, RESUME_BACKOFF_MS * (attempts + 1)));
+  return true;
 }
 
 function startProgressTimer(startedAt) {
@@ -625,26 +725,31 @@ function stopProgressTimer() {
   }
 }
 
-async function readEventStream(response, pending, sessionId) {
+async function readEventStream(response, pending) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return "ended";
+      buffer += decoder.decode(value, { stream: true });
 
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      handleEventBlock(buffer.slice(0, boundary), pending, sessionId);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        handleEventBlock(buffer.slice(0, boundary), pending);
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
     }
+  } catch (error) {
+    // 网络断了、或者服务重启了：交给上层决定要不要重连
+    return "broken";
   }
 }
 
-function handleEventBlock(block, pending, sessionId) {
+function handleEventBlock(block, pending) {
   let type = "message";
   const dataLines = [];
   block.split("\n").forEach((line) => {
@@ -660,6 +765,18 @@ function handleEventBlock(block, pending, sessionId) {
     return;
   }
 
+  // run 帧只是告诉前端"这次运行的编号是什么"，不占事件下标
+  if (type === "run") {
+    state.runId = payload.id || state.runId;
+    return;
+  }
+  // 服务端丢了老事件：以它给的下标为准重新对齐
+  if (type === "truncated") {
+    state.eventCount = Number(payload.from) || 0;
+    return;
+  }
+  state.eventCount += 1;
+
   // step 与 status 事件只会透露推理过程，页面上不做任何渲染
   if (type === "answer") {
     resolvePending(pending, payload);
@@ -669,6 +786,7 @@ function handleEventBlock(block, pending, sessionId) {
 }
 
 async function resolvePending(pending, result) {
+  state.settled = true;
   const usage = result.usage || {};
   const answer = result.answer || "（这次没有得出结论）";
   const meta = [
@@ -698,6 +816,7 @@ async function resolvePending(pending, result) {
 }
 
 function failPending(pending, message) {
+  state.settled = true;
   const text = `${message} 请检查 .env 里的模型配置。`;
   renderMessage(pending, {
     role: "assistant",
