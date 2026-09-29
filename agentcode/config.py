@@ -13,6 +13,12 @@ from typing import Any, Mapping
 from dotenv import dotenv_values
 
 from agentcode.core.errors import ConfigError
+from agentcode.llm.keypool import (
+    DEFAULT_COOLDOWN_SECONDS,
+    DEFAULT_FAILURE_THRESHOLD,
+    mask_key,
+    parse_keys,
+)
 
 #: 必需的环境变量
 REQUIRED_LLM_KEYS: tuple[str, ...] = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL_ID")
@@ -59,6 +65,9 @@ DEFAULT_MAX_CONCURRENT_RUNS = 2
 DEFAULT_RUN_TOKEN_BUDGET = 30_000
 #: 面向公网时默认不允许执行代码；本地 CLI 使用不受影响
 DEFAULT_ALLOW_CODE_TOOLS = False
+#: API key 熔断：连续失败几次摘掉、冷却多久放回来
+DEFAULT_KEY_FAILURE_THRESHOLD = DEFAULT_FAILURE_THRESHOLD
+DEFAULT_KEY_COOLDOWN_SECONDS = DEFAULT_COOLDOWN_SECONDS
 
 
 def mask_secret(value: str | None) -> str:
@@ -114,6 +123,8 @@ class Settings:
 
     model: str | None = None
     api_key: str | None = None
+    #: 多个 key（``LLM_API_KEYS``）；为空时回落到 ``api_key`` 单个
+    api_keys: list[str] = field(default_factory=list)
     base_url: str | None = None
     timeout: float = DEFAULT_TIMEOUT
     temperature: float = DEFAULT_TEMPERATURE
@@ -142,6 +153,8 @@ class Settings:
     max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
     run_token_budget: int = DEFAULT_RUN_TOKEN_BUDGET
     allow_code_tools: bool = DEFAULT_ALLOW_CODE_TOOLS
+    key_failure_threshold: int = DEFAULT_KEY_FAILURE_THRESHOLD
+    key_cooldown_seconds: float = DEFAULT_KEY_COOLDOWN_SECONDS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -175,9 +188,13 @@ class Settings:
             """进程环境变量优先于 .env 文件。"""
             return os.environ.get(key) or file_values.get(key) or default
 
+        # LLM_API_KEYS 支持逗号/换行分隔的多个 key；没配就回落到单个 LLM_API_KEY
+        api_keys = parse_keys(pick("LLM_API_KEYS") or pick("LLM_API_KEY"))
+
         return cls(
             model=pick("LLM_MODEL_ID"),
-            api_key=pick("LLM_API_KEY"),
+            api_key=api_keys[0] if api_keys else pick("LLM_API_KEY"),
+            api_keys=api_keys,
             base_url=pick("LLM_BASE_URL"),
             timeout=_to_float(pick("LLM_TIMEOUT"), DEFAULT_TIMEOUT),
             temperature=_to_float(pick("LLM_TEMPERATURE"), DEFAULT_TEMPERATURE),
@@ -214,6 +231,12 @@ class Settings:
             ),
             run_token_budget=_to_int(pick("AGENT_RUN_TOKEN_BUDGET"), DEFAULT_RUN_TOKEN_BUDGET),
             allow_code_tools=_to_bool(pick("AGENT_ALLOW_CODE_TOOLS"), DEFAULT_ALLOW_CODE_TOOLS),
+            key_failure_threshold=_to_int(
+                pick("AGENT_KEY_FAILURE_THRESHOLD"), DEFAULT_KEY_FAILURE_THRESHOLD
+            ),
+            key_cooldown_seconds=_to_float(
+                pick("AGENT_KEY_COOLDOWN_SECONDS"), DEFAULT_KEY_COOLDOWN_SECONDS
+            ),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -233,10 +256,17 @@ class Settings:
 
     # ------------------------------------------------------------------ 校验
 
+    def api_key_list(self) -> list[str]:
+        """返回全部可用的模型 key：``LLM_API_KEYS`` 优先，回落到单个 ``LLM_API_KEY``。"""
+        keys = [key for key in (self.api_keys or []) if key]
+        if not keys and self.api_key:
+            keys = [self.api_key]
+        return keys
+
     def missing_keys(self) -> list[str]:
         """返回尚未配置的必需环境变量名。"""
         values = {
-            "LLM_API_KEY": self.api_key,
+            "LLM_API_KEY": self.api_key_list() or None,
             "LLM_BASE_URL": self.base_url,
             "LLM_MODEL_ID": self.model,
         }
@@ -263,6 +293,8 @@ class Settings:
             "AGENT_RATE_LIMIT_PER_MINUTE": self.rate_limit_per_minute,
             "AGENT_MAX_CONCURRENT_RUNS": self.max_concurrent_runs,
             "AGENT_RUN_TOKEN_BUDGET": self.run_token_budget,
+            "AGENT_KEY_FAILURE_THRESHOLD": self.key_failure_threshold,
+            "AGENT_KEY_COOLDOWN_SECONDS": self.key_cooldown_seconds,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -285,6 +317,7 @@ class Settings:
             "LLM_MODEL_ID": self.model or "（未配置）",
             "LLM_BASE_URL": self.base_url or "（未配置）",
             "LLM_API_KEY": mask_secret(self.api_key),
+            "LLM_API_KEYS": self._keys_summary(),
             "SERPAPI_API_KEY": mask_secret(self.serpapi_key),
             "LLM_TIMEOUT": str(self.timeout),
             "LLM_TEMPERATURE": str(self.temperature),
@@ -295,6 +328,8 @@ class Settings:
             "AGENT_MAX_CONCURRENT_RUNS": str(self.max_concurrent_runs),
             "AGENT_RUN_TOKEN_BUDGET": str(self.run_token_budget),
             "AGENT_ALLOW_CODE_TOOLS": "是" if self.allow_code_tools else "否",
+            "AGENT_KEY_FAILURE_THRESHOLD": str(self.key_failure_threshold),
+            "AGENT_KEY_COOLDOWN_SECONDS": str(self.key_cooldown_seconds),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
@@ -311,3 +346,12 @@ class Settings:
             "AGENT_TRACE_DIR": self.trace_dir,
             ".env 来源": self.env_file or "（未找到，使用进程环境变量）",
         }
+
+    def _keys_summary(self) -> str:
+        """把 key 池脱敏成一行摘要。"""
+        keys = self.api_key_list()
+        if not keys:
+            return "（未配置）"
+        if len(keys) == 1:
+            return f"共 1 个：{mask_key(keys[0])}"
+        return f"共 {len(keys)} 个：" + "、".join(mask_key(key) for key in keys)
