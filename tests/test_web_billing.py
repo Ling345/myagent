@@ -200,3 +200,90 @@ def test_scope_without_plan_keeps_settings():
         model="m", api_key="sk-x", base_url="https://x.invalid", allow_code_tools=True
     )
     assert scope_settings_for_plan(settings, None).allow_code_tools is True
+
+
+# ---------------------------------------------------------------- 接口
+
+
+def test_plans_endpoint_lists_sellable_plans(web):
+    base, _, _ = web
+    client = _Client(base)
+    client.login("alice")
+
+    status, payload = client.get("/api/plans")
+    assert status == 200
+    names = [plan["name"] for plan in payload["plans"]]
+    assert names == ["free", "basic", "pro", "team"]
+    assert "owner" not in names
+
+
+def test_billing_endpoint_shape(web):
+    base, accounts, account = web
+    accounts.record_usage(account.id, 10)
+    client = _Client(base)
+    client.login("alice")
+
+    status, payload = client.get("/api/billing")
+    assert status == 200
+    assert payload["plan"]["name"] == "free"
+    assert payload["used_today"] == 10
+    assert payload["daily_limit"] == 40  # 这个账号被设了 40 的覆盖
+    assert payload["remaining_today"] == 30
+    assert payload["orders"] == []
+
+
+def test_checkout_rejects_internal_plan(web):
+    base, _, _ = web
+    client = _Client(base)
+    client.login("alice")
+
+    status, payload = client.post("/api/billing/checkout", {"plan": "owner", "months": 1})
+    assert status == 400
+    assert "不可购买" in payload["error"]
+
+
+def test_checkout_rejects_bad_months(web):
+    base, _, _ = web
+    client = _Client(base)
+    client.login("alice")
+
+    status, payload = client.post("/api/billing/checkout", {"plan": "basic", "months": 99})
+    assert status == 400
+    assert "月数" in payload["error"]
+
+
+def test_checkout_returns_a_pending_order_for_a_sellable_plan(web):
+    base, _, _ = web
+    client = _Client(base)
+    client.login("alice")
+
+    status, payload = client.post("/api/billing/checkout", {"plan": "pro", "months": 2})
+    assert status == 200
+    assert payload["order"]["plan"] == "pro"
+    assert payload["order"]["amount_cents"] == 9_900 * 2
+    assert payload["order"]["status"] == "pending"
+    assert "订单号" in payload["message"] or payload["order"]["id"]
+
+
+def test_checkout_order_shows_up_in_billing(web):
+    base, _, _ = web
+    client = _Client(base)
+    client.login("alice")
+
+    client.post("/api/billing/checkout", {"plan": "basic", "months": 1})
+    _, payload = client.get("/api/billing")
+    assert len(payload["orders"]) == 1
+    assert payload["orders"][0]["plan"] == "basic"
+
+
+def test_billing_endpoints_require_login(tmp_path):
+    server, accounts, base = _server(tmp_path)
+    accounts.create("alice", "password123")
+    try:
+        client = _Client(base)
+        for path in ("/api/plans", "/api/billing"):
+            assert client.get(path)[0] == 401
+        assert client.post("/api/billing/checkout", {"plan": "basic"})[0] == 401
+    finally:
+        server.shutdown()
+        server.server_close()
