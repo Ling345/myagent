@@ -205,6 +205,20 @@ class Metrics:
             self._hist_sums.clear()
             self._hist_buckets.clear()
 
+    def snapshot(self) -> dict[str, float]:
+        """把当前所有序列的值拍成一张扁平的快照。
+
+        键形如 ``agentcode_llm_calls_total{key="0",result="ok"}``。
+        告警要算"最近 5 分钟涨了多少"，靠它取两次快照做差。
+        """
+        with self._lock:
+            flat: dict[str, float] = {}
+            for (name, labels), value in self._values.items():
+                flat[f"{name}{_render_labels(labels)}"] = value
+            for (name, labels), count in self._hist_counts.items():
+                flat[f"{name}_count{_render_labels(labels)}"] = float(count)
+            return flat
+
 
 def _format(value: float) -> str:
     """整数写成 x.0，小数保留三位有效数字，避免浮点长尾巴。"""
