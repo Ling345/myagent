@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
 from agentcode.core.errors import ConfigError
+from agentcode.metrics import KEY_TRIPS
 
 #: 连续失败多少次就把这个 key 摘掉
 DEFAULT_FAILURE_THRESHOLD = 3
@@ -129,6 +130,9 @@ class KeyPool:
             state.failures += 1
             if state.failures >= self.failure_threshold:
                 state.opened_until = self._clock() + self.cooldown
+                # 标签用 key 的**下标**：指标要往监控系统送，少暴露一点是一点。
+                # 下标与 `agentcode config` 里那串脱敏 key 的顺序一致。
+                KEY_TRIPS.inc(key=str(state.index))
 
     # ------------------------------------------------------------------ 观测
 
