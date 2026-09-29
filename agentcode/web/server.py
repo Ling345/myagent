@@ -27,6 +27,7 @@ from agentcode.config import (
     Settings,
 )
 from agentcode.core.registry import default_registry
+from agentcode.core.errors import AgentCodeError
 from agentcode.plans import get_plan
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
 from agentcode.web.limits import (
@@ -254,6 +255,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         """当前服务进程的运行注册表。"""
         return self.server.registry  # type: ignore[attr-defined]
 
+    def _billing(self) -> Any:
+        """当前服务进程的账单服务（套餐、订单、用量）。"""
+        return self.server.billing  # type: ignore[attr-defined]
+
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
         if not getattr(self.server, "require_auth", True):
@@ -428,6 +433,16 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/run/stream":
             self._serve_run_resume()
             return
+        if path == "/api/plans":
+            self._send_json({"plans": [plan.to_dict() for plan in self._billing().plans()]})
+            return
+        if path == "/api/billing":
+            account = getattr(self, "_account", None)
+            if account is None:
+                self._send_json({"error": "请先登录。"}, status=401)
+                return
+            self._send_json(self._billing().my_billing(account))
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
     def _account_payload(self, account: Account) -> dict[str, Any]:
@@ -492,6 +507,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/login",
             "/api/logout",
             "/api/run",
+            "/api/billing/checkout",
             "/api/session/reset",
             "/api/sessions/create",
             "/api/sessions/rename",
@@ -534,6 +550,28 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         account = getattr(self, "_account", None)
+
+        if path == "/api/billing/checkout":
+            # 管理动作（确认到账、直接开通）只在 CLI，网页这边只负责下单
+            if account is None:
+                self._send_json({"error": "请先登录。"}, status=401)
+                return
+            try:
+                order = self._billing().checkout(
+                    account,
+                    str(payload.get("plan") or ""),
+                    int(payload.get("months") or 1),
+                )
+            except (AgentCodeError, TypeError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json(
+                {
+                    "order": order.to_dict(),
+                    "message": "订单已创建。请按约定方式付款，管理员确认到账后套餐立即生效。",
+                }
+            )
+            return
 
         session_store: SessionStore = self._store()
         raw_session = str(payload.get("session_id") or "").strip()
