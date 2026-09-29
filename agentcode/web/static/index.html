@@ -47,8 +47,23 @@
         <div class="account" id="account" hidden>
           <span class="account-name" id="account-name"></span>
           <span class="account-quota" id="account-quota"></span>
+          <button type="button" id="billing-toggle" class="link">套餐与用量</button>
           <button type="button" id="logout-button" class="link">退出</button>
         </div>
+
+        <section id="billing-panel" class="billing-panel" hidden>
+          <header class="billing-head">
+            <strong id="billing-plan">—</strong>
+            <span id="billing-expiry" class="billing-expiry"></span>
+            <button type="button" id="billing-close" class="icon" aria-label="关闭">✕</button>
+          </header>
+          <div class="billing-usage">
+            <div class="billing-bar"><span id="billing-bar-fill"></span></div>
+            <p id="billing-usage-text" class="billing-usage-text"></p>
+          </div>
+          <div class="billing-plans" id="billing-plans"></div>
+          <ul class="billing-orders" id="billing-orders"></ul>
+        </section>
       </aside>
 
       <main class="chat">

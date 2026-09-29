@@ -26,6 +26,15 @@ const els = {
   account: document.getElementById("account"),
   accountName: document.getElementById("account-name"),
   accountQuota: document.getElementById("account-quota"),
+  billingToggle: document.getElementById("billing-toggle"),
+  billingPanel: document.getElementById("billing-panel"),
+  billingClose: document.getElementById("billing-close"),
+  billingPlan: document.getElementById("billing-plan"),
+  billingExpiry: document.getElementById("billing-expiry"),
+  billingBarFill: document.getElementById("billing-bar-fill"),
+  billingUsageText: document.getElementById("billing-usage-text"),
+  billingPlans: document.getElementById("billing-plans"),
+  billingOrders: document.getElementById("billing-orders"),
   logoutButton: document.getElementById("logout-button"),
 };
 
@@ -105,10 +114,15 @@ function renderAccount(account) {
   }
   els.account.hidden = false;
   els.accountName.textContent = account.name;
-  els.accountQuota.textContent = `今日 ${formatTokens(account.used_today)}/${formatTokens(
-    account.daily_token_limit
-  )}`;
-  els.accountQuota.title = `今日已用 ${account.used_today} token，共 ${account.calls_today} 次调用`;
+  if (account.unlimited) {
+    els.accountQuota.textContent = `今日 ${formatTokens(account.used_today)}`;
+    els.accountQuota.title = `不限量套餐，今日已用 ${account.used_today} token`;
+  } else {
+    els.accountQuota.textContent = `今日 ${formatTokens(account.used_today)}/${formatTokens(
+      account.daily_token_limit
+    )}`;
+    els.accountQuota.title = `今日已用 ${account.used_today} token，共 ${account.calls_today} 次调用`;
+  }
 }
 
 function showLogin(message = "") {
@@ -887,5 +901,95 @@ async function boot() {
 
 els.loginForm.addEventListener("submit", submitLogin);
 els.logoutButton.addEventListener("click", logout);
+
+// ------------------------------------------------------------ 套餐与用量面板
+
+/**
+ * 打开面板并拉一次最新数据。
+ *
+ * 面板默认收起：主界面只给结果，这是既有约定。
+ */
+async function openBilling() {
+  els.billingPanel.hidden = false;
+  try {
+    const [billing, plans] = await Promise.all([
+      (await fetch("/api/billing")).json(),
+      (await fetch("/api/plans")).json(),
+    ]);
+    renderBilling(billing, plans.plans || []);
+  } catch (error) {
+    els.billingUsageText.textContent = `读取失败：${error.message}`;
+  }
+}
+
+function renderBilling(billing, plans) {
+  const plan = billing.plan || {};
+  els.billingPlan.textContent = plan.title || plan.name || "—";
+  els.billingExpiry.textContent = billing.plan_expires_at
+    ? `到期 ${String(billing.plan_expires_at).slice(0, 10)}`
+    : plan.name === "owner"
+      ? "不过期"
+      : "永久";
+
+  const unlimited = billing.remaining_today < 0;
+  const limit = billing.daily_limit || 0;
+  const used = billing.used_today || 0;
+  const ratio = unlimited || !limit ? 0 : Math.min(1, used / limit);
+  els.billingBarFill.style.width = `${Math.round(ratio * 100)}%`;
+  els.billingBarFill.classList.toggle("is-over", !unlimited && used >= limit);
+  els.billingUsageText.textContent = unlimited
+    ? `今日已用 ${formatTokens(used)} token（不限量）`
+    : `今日 ${formatTokens(used)} / ${formatTokens(limit)} token，本周期累计 ${formatTokens(
+        billing.used_this_period || 0
+      )}`;
+
+  els.billingPlans.innerHTML = plans
+    .map(
+      (item) => `
+      <div class="billing-plan-card">
+        <span>${escapeHtml(item.title)}</span>
+        <span>${item.price_cents === 0 ? "免费" : `¥${(item.price_cents / 100).toFixed(0)}/月`}</span>
+        <span>${formatTokens(item.daily_tokens)} token/天</span>
+        <button type="button" data-plan="${escapeHtml(item.name)}">升级</button>
+      </div>`
+    )
+    .join("");
+  els.billingPlans.querySelectorAll("button[data-plan]").forEach((button) => {
+    button.addEventListener("click", () => checkout(button.dataset.plan));
+  });
+
+  els.billingOrders.innerHTML = (billing.orders || [])
+    .map(
+      (order) =>
+        `<li>${String(order.created_at).slice(0, 10)}　${escapeHtml(order.plan)}　` +
+        `¥${(order.amount_cents / 100).toFixed(2)}　[${escapeHtml(order.status)}]</li>`
+    )
+    .join("");
+}
+
+/** 下单。手动模式下拿到的是「待支付」，要管理员确认到账才生效。 */
+async function checkout(planName) {
+  try {
+    const response = await fetch("/api/billing/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan: planName, months: 1 }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      els.runStatus.textContent = payload.error || "下单失败。";
+      return;
+    }
+    els.runStatus.textContent = `${payload.message} 订单号：${payload.order.id}`;
+    await openBilling();
+  } catch (error) {
+    els.runStatus.textContent = `下单失败：${error.message}`;
+  }
+}
+
+els.billingToggle.addEventListener("click", openBilling);
+els.billingClose.addEventListener("click", () => {
+  els.billingPanel.hidden = true;
+});
 
 boot();
