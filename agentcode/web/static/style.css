@@ -19,6 +19,8 @@
   --font-ui: "PingFang SC", "Microsoft YaHei UI", "Source Han Sans SC", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
   --radius: 12px;
+  /* 侧栏宽度：可拖拽调整，拖完记在 localStorage 里 */
+  --sidebar-width: 264px;
 }
 
 * {
@@ -202,9 +204,10 @@ body {
 
 .app {
   display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   grid-template-rows: 100vh;
   height: 100vh;
+  position: relative;
 }
 
 .sidebar {
@@ -242,6 +245,73 @@ body {
   padding-left: 6px;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* 「智能体」标题是个开关：点一下收起列表，把空间让给下面的面板 */
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  margin: 0 0 -8px;
+  padding: 2px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-toggle:hover {
+  color: var(--text);
+}
+
+.toggle-arrow {
+  display: inline-block;
+  width: 10px;
+  transition: transform 0.18s ease;
+}
+
+.sidebar-toggle.is-collapsed .toggle-arrow {
+  transform: rotate(-90deg);
+}
+
+/* 拖拽调整侧栏宽度：贴在侧栏右边缘的一条热点 */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-width);
+  width: 9px;
+  margin-left: -4px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 6;
+}
+
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 4px;
+  width: 1px;
+  height: 32px;
+  margin-top: -16px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+body.is-resizing .sidebar-resizer::after {
+  background: var(--accent);
+}
+
+body.is-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .agent-list {
@@ -824,6 +894,11 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* 窄屏下侧栏变成横条，拖拽调宽没有意义 */
+  .sidebar-resizer {
+    display: none;
+  }
+
   .sidebar {
     flex-direction: row;
     align-items: center;
@@ -903,12 +978,15 @@ button:disabled {
 #billing-panel[hidden] { display: none; }
 
 .billing-panel {
+  /* 不参与收缩：否则会被上面的会话列表挤成一条缝（实测只剩 30px 高）。
+     高度按内容走，最长到 70vh，超出自己滚动。 */
+  flex: 0 0 auto;
+  max-height: 70vh;
   margin: 8px 12px 12px;
   padding: 14px;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(63, 92, 240, 0.14);
-  max-height: 58vh;
   overflow-y: auto;
   font-size: 13px;
 }

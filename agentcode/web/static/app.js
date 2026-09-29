@@ -4,6 +4,10 @@ const PREFERRED_AGENT = "react";
 const TIMER_INTERVAL_MS = 200;
 const SESSION_KEY = "agentcode-session";
 const MAX_TEXTAREA_HEIGHT = 200;
+const SIDEBAR_WIDTH_KEY = "agentcode-sidebar-width";
+const AGENTS_COLLAPSED_KEY = "agentcode-agents-collapsed";
+const MIN_SIDEBAR_WIDTH = 240;
+const MAX_SIDEBAR_WIDTH = 420;
 
 const els = {
   form: document.getElementById("run-form"),
@@ -26,6 +30,10 @@ const els = {
   account: document.getElementById("account"),
   accountName: document.getElementById("account-name"),
   accountQuota: document.getElementById("account-quota"),
+  sidebar: document.getElementById("sidebar"),
+  agentToggle: document.getElementById("agent-toggle"),
+  agentToggleLabel: document.getElementById("agent-toggle-label"),
+  sidebarResizer: document.getElementById("sidebar-resizer"),
   billingToggle: document.getElementById("billing-toggle"),
   billingPanel: document.getElementById("billing-panel"),
   billingClose: document.getElementById("billing-close"),
@@ -52,6 +60,8 @@ const state = {
   eventCount: 0,
   //: 本次运行是否已经拿到最终结果（answer/error）
   settled: false,
+  //: 「智能体」列表是否收起（收起后把空间让给套餐面板）
+  agentsCollapsed: false,
   //: 是否跟随最新消息（用户往上翻看历史时置为 false，翻回底部再恢复）
   followTail: true,
 };
@@ -896,6 +906,8 @@ async function boot() {
   showApp();
   renderAccount(account);
   await loadMeta();
+  // 等智能体列表渲染完再恢复折叠状态，标题上才能显示正确的当前智能体名
+  restoreLayout();
   await bootSession();
 }
 
@@ -990,6 +1002,86 @@ async function checkout(planName) {
 els.billingToggle.addEventListener("click", openBilling);
 els.billingClose.addEventListener("click", () => {
   els.billingPanel.hidden = true;
+});
+
+// ------------------------------------------------------ 侧栏布局：折叠与调宽
+
+function clampSidebarWidth(px) {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, px));
+}
+
+function setSidebarWidth(px) {
+  document.documentElement.style.setProperty("--sidebar-width", `${Math.round(px)}px`);
+}
+
+/** 收起「智能体」列表，把空间让给下面的套餐面板。 */
+function setAgentsCollapsed(collapsed) {
+  state.agentsCollapsed = collapsed;
+  els.agentList.hidden = collapsed;
+  els.agentToggle.classList.toggle("is-collapsed", collapsed);
+  els.agentToggle.setAttribute("aria-expanded", String(!collapsed));
+  // 收起后看不到列表了，把当前选中的智能体写在标题上，免得不知道用的是哪个
+  els.agentToggleLabel.textContent = collapsed ? `智能体（${selectedAgent()}）` : "智能体";
+}
+
+function toggleAgents() {
+  const collapsed = !state.agentsCollapsed;
+  setAgentsCollapsed(collapsed);
+  localStorage.setItem(AGENTS_COLLAPSED_KEY, collapsed ? "1" : "0");
+}
+
+/** 拖右边缘调侧栏宽度。 */
+function startSidebarResize(event) {
+  if (event.button !== undefined && event.button !== 0) return;
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = els.sidebar.getBoundingClientRect().width;
+  document.body.classList.add("is-resizing");
+
+  const onMove = (moveEvent) => {
+    setSidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+  };
+  const onDone = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onDone);
+    window.removeEventListener("pointercancel", onDone);
+    document.body.classList.remove("is-resizing");
+    const finalWidth = els.sidebar.getBoundingClientRect().width;
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(finalWidth)));
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onDone);
+  window.addEventListener("pointercancel", onDone);
+}
+
+/** 键盘也能调：方向键每次 16px（无障碍要求，别只给鼠标一条路）。 */
+function resizeSidebarWithKeyboard(event) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const current = els.sidebar.getBoundingClientRect().width;
+  const next = clampSidebarWidth(current + (event.key === "ArrowRight" ? 16 : -16));
+  setSidebarWidth(next);
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(next)));
+}
+
+/** 恢复上次的折叠状态与侧栏宽度。 */
+function restoreLayout() {
+  const storedWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (Number.isFinite(storedWidth) && storedWidth >= MIN_SIDEBAR_WIDTH) {
+    setSidebarWidth(clampSidebarWidth(storedWidth));
+  }
+  setAgentsCollapsed(localStorage.getItem(AGENTS_COLLAPSED_KEY) === "1");
+}
+
+els.agentToggle.addEventListener("click", toggleAgents);
+els.sidebarResizer.addEventListener("pointerdown", startSidebarResize);
+els.sidebarResizer.addEventListener("keydown", resizeSidebarWithKeyboard);
+// 收起状态下换了智能体，标题上显示的名字也要跟着变
+document.addEventListener("change", (event) => {
+  if (event.target && event.target.name === "agent" && state.agentsCollapsed) {
+    els.agentToggleLabel.textContent = `智能体（${selectedAgent()}）`;
+  }
 });
 
 boot();
