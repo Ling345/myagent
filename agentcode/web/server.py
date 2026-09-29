@@ -840,6 +840,10 @@ def create_server(
     server.accounts = accounts or AccountStore(  # type: ignore[attr-defined]
         os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH
     )
+    # 告警监控：默认只记日志（webhook 为空），serve() 里会用真实配置重建
+    from agentcode.alerts import AlertMonitor
+
+    server.alert_monitor = AlertMonitor()  # type: ignore[attr-defined]
     # 账单服务：套餐、订单、用量都从这里拿
     from agentcode.billing import BillingService
 
@@ -905,6 +909,20 @@ def serve(
         print(f"端口可能已被占用，请换一个端口，例如 --port {port + 1}。")
         return
 
+    # 告警监控：每 60 秒拍一次指标快照，按阈值判断，命中就记日志/推 webhook
+    from agentcode.alerts import AlertMonitor, run_alert_loop
+
+    monitor = AlertMonitor(
+        webhook=settings_for_limits.alert_webhook or "",
+        window_seconds=settings_for_limits.alert_window_seconds,
+        cooldown_seconds=settings_for_limits.alert_cooldown_seconds,
+        error_rate=settings_for_limits.alert_error_rate,
+    )
+    server.alert_monitor = monitor  # type: ignore[attr-defined]
+    threading.Thread(
+        target=run_alert_loop, args=(monitor,), name="agentcode-alerts", daemon=True
+    ).start()
+
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上不显示模式，一切走这个设置）")
@@ -913,6 +931,14 @@ def serve(
         f"同时最多 {settings_for_limits.max_concurrent_runs} 个任务；"
         f"单次任务 token 预算 {settings_for_limits.run_token_budget}"
     )
+    if monitor.webhook:
+        print(
+            f"告警：已开启（窗口 {monitor.window_seconds:g} 秒，"
+            f"错误率阈值 {monitor.error_rate:.0%}，命中后推到配置的 webhook）"
+        )
+    else:
+        print("告警：只在日志里报，不推送（要推送就配 AGENT_ALERT_WEBHOOK）")
+    print(f"指标：{url}/metrics")
     if require_auth:
         if boot_password:
             print("=" * 56)
