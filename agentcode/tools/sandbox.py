@@ -189,6 +189,24 @@ class DockerBackend:
         """兼容旧名字：只用于展示。"""
         return " ".join(self.docker_prefix)
 
+    def prepare_workspace(self) -> None:
+        """确保工作目录存在，并且**容器里的 nobody 能写**。
+
+        这里踩过一个只在 Linux 上才现形的坑：应用在服务器上（尤其是容器里）
+        是以 root 跑的，``mkdir`` 出来是 0755；而沙箱以 nobody(65534) 运行，
+        于是模型写的文件会直接 ``Permission denied``——test_gen 写不出测试文件。
+        在 Windows 上一直没暴露，是因为 ``/mnt/d`` 的挂载权限是 0777。
+
+        所以挂载前把工作目录放开到 0777。这个目录是每个账号自己的代码目录，
+        除了应用本身就只有沙箱会写它。
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.root, 0o777)
+        except OSError:
+            # Windows 上 chmod 基本是空操作；真失败也不该拦住执行
+            pass
+
     def build_command(self, container_name: str) -> list[str]:
         """拼出 ``docker run`` 命令（单独抽出来便于测试与审查）。"""
         mount = translate_mount_path(self.docker_prefix, self.root)
@@ -260,6 +278,7 @@ class DockerBackend:
             )
 
         container_name = f"agentcode-{uuid.uuid4().hex[:8]}"
+        self.prepare_workspace()
         command = self.build_command(container_name)
         try:
             completed = subprocess.run(

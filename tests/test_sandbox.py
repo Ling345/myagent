@@ -139,6 +139,27 @@ def test_local_backend_reports_timeout(tmp_path):
     assert result.ok is False
 
 
+# ------------------------------------------------------- 工作目录的可写性
+
+
+def test_prepare_workspace_creates_the_directory(tmp_path):
+    target = tmp_path / "nested" / "sandbox"
+    _docker(target).prepare_workspace()
+    assert target.is_dir()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="权限位只在 POSIX 上才有意义")
+def test_prepare_workspace_makes_it_writable_by_the_sandbox_user(tmp_path):
+    """回归：应用在 Linux 上是 root，mkdir 出来是 0755，
+    而沙箱以 nobody 跑——不放开写权限的话，模型写的文件会被 Permission denied。
+    这个坑在 Windows 上看不到，因为 /mnt/d 本来就是 0777。"""
+    target = tmp_path / "sandbox"
+    target.mkdir()
+    os.chmod(target, 0o700)  # 模拟 root 用 umask 022 建出来的严格权限
+    _docker(target).prepare_workspace()
+    assert (target.stat().st_mode & 0o777) == 0o777
+
+
 # ------------------------------------------------------- 与工具注册的接线
 
 
