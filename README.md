@@ -29,6 +29,9 @@
 >
 > 阶段七进行中：**隐私政策、数据导出与注销**。
 > 详见「数据与隐私」一节。
+>
+> 阶段八进行中：**把测试生成收窄成能放进工作流的场景**（`agentcode test-gen` + GitHub Action）。
+> 详见「批量补测试」一节。
 
 内置四种智能体：
 
@@ -71,6 +74,53 @@ D:\Anaconda\python.exe -m agentcode run --agent test_gen --file examples\sample_
 # 离线演示（不消耗额度，内置脚本模型，配套上面那个示例文件）
 D:\Anaconda\python.exe -m agentcode run --agent test_gen --llm mock --file examples\sample_code\calculator.py
 ```
+
+### 批量补测试：`agentcode test-gen`
+
+上面那条是"给它一个文件、看它怎么做"。真要用起来，是这个子命令：
+
+```powershell
+# 给一个文件补测试（写到源文件旁边）
+D:\Anaconda\python.exe -m agentcode test-gen src\utils.py
+
+# 给整个目录补测试（递归找 .py，自动跳过已有测试与 conftest）
+D:\Anaconda\python.exe -m agentcode test-gen src\
+
+# 只看看会处理哪些文件，不真的跑
+D:\Anaconda\python.exe -m agentcode test-gen src\ --dry-run
+
+# 写到 tests/ 目录；已有的测试文件要覆盖得显式加 --force
+D:\Anaconda\python.exe -m agentcode test-gen src\ --out tests --force
+```
+
+**退出码是一道门禁**：`0` = 全成（写好了或者本来就有测试所以跳过）；`1` = 有文件没搞定。
+放进 CI 就能拦住"生成了但跑不通"。
+
+三个刻意的设计：
+
+| 决定 | 为什么 |
+| --- | --- |
+| 测试写到**源文件旁边**（或 `--out` 指定的目录） | agent 的工作目录是内部实现，用户不该去那儿找产物 |
+| 已有测试文件**默认跳过**，要覆盖必须 `--force` | 静默覆盖别人写好的测试，是最容易让人拉黑一个工具的行为 |
+| **"模型说成功了"不算成功** | 工作目录里必须真的有测试文件落下来才算，否则报失败——不然用户看到一片绿，实际什么都没生成 |
+
+### 放进 CI：`.github/workflows/test-gen.yml`
+
+仓库里带了一个现成的 workflow：PR 有 Python 改动时，自动为改动过的源码文件补测试，
+把生成的测试作为 artifact 传上来。
+
+设计取向是**助手而不是裁判**——默认不拦 PR（写不出测试不该红叉拦人），
+结果放在 step summary 里，想变成门禁把最后那步的 `|| true` 去掉即可。
+
+要让它真的跑起来，需要在仓库的 **Settings → Secrets and variables → Actions** 里配：
+
+| 类型 | 名字 | 值 |
+| --- | --- | --- |
+| Secret | `LLM_API_KEY` | 你的模型密钥 |
+| Variable | `LLM_BASE_URL` | 例如 `https://api.deepseek.com` |
+| Variable | `LLM_MODEL_ID` | 例如 `deepseek-chat` |
+
+**没配就整条跳过，不报错**——免得每个 PR 都挂一个红叉。
 
 `test_gen` 有五条纪律写进提示词并有测试守着：先读源码再写测试、**不修改被测源文件**、
 只跑自己写的测试文件、必须覆盖边界（空输入/零/负数/非法类型/`pytest.raises`）、
