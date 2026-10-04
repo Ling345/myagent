@@ -105,3 +105,42 @@ def test_deploy_doc_covers_the_essentials():
 
 def test_deploy_doc_warns_about_path_consistency():
     assert "两边一致" in _read("docs/deploy.md") or "路径必须" in _read("docs/deploy.md")
+
+
+# ------------------------------------------------------------------ 测试生成 workflow
+
+
+def test_testgen_workflow_skips_gracefully_without_a_key():
+    """没配密钥就整条跳过——否则每个 PR 都挂一个红叉，很快就没人看 CI 了。"""
+    workflow = _read(".github/workflows/test-gen.yml")
+    assert "secrets.LLM_API_KEY" in workflow
+    assert "ready=false" in workflow
+    assert "if: steps.check.outputs.ready == 'true'" in workflow
+
+
+def test_testgen_workflow_passes_the_secret_via_env():
+    """密钥直接从模板插进 shell 字符串是不安全的写法（特殊字符会出事）。"""
+    workflow = _read(".github/workflows/test-gen.yml")
+    assert 'LLM_API_KEY: ${{ secrets.LLM_API_KEY }}' in workflow
+    assert '[ -z "$LLM_API_KEY" ]' in workflow
+    assert '[ -z "$${{ secrets.LLM_API_KEY }}" ]' not in workflow
+
+
+def test_testgen_workflow_ignores_test_files():
+    workflow = _read(".github/workflows/test-gen.yml")
+    assert "git diff --name-only" in workflow
+    assert "conftest" in workflow
+    assert "tests?" in workflow
+
+
+def test_testgen_workflow_uploads_what_it_generated():
+    """生成出来的测试得能被下载——不然跑完等于没跑。"""
+    workflow = _read(".github/workflows/test-gen.yml")
+    assert "actions/upload-artifact" in workflow
+    assert "GITHUB_STEP_SUMMARY" in workflow
+
+
+def test_testgen_command_is_documented():
+    readme = _read("README.md")
+    assert "agentcode test-gen" in readme
+    assert "退出码是一道门禁" in readme

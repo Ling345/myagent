@@ -1,0 +1,113 @@
+name: 测试生成
+
+# 给改动过的源码文件自动补 pytest 测试，把生成的测试作为 artifact 传上来。
+#
+# 设计取向是**助手而不是裁判**：默认不拦 PR（写不出测试不该红叉拦人），
+# 结果放在 step summary 里，需要时把生成的测试下载下来自己审。
+# 想让它变成门禁，把最后那步的 `|| true` 去掉即可。
+#
+# 需要配置（仓库 Settings → Secrets and variables → Actions）：
+#   Secrets: LLM_API_KEY
+#   Variables: LLM_BASE_URL、LLM_MODEL_ID
+# 没配就整条跳过，不报错——免得每个 PR 都挂一个红叉。
+
+on:
+  pull_request:
+    paths:
+      - "**.py"
+  workflow_dispatch:
+
+jobs:
+  test-gen:
+    name: 为改动的文件补测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 要比对 base 分支，得拿到完整历史
+
+      - name: 检查密钥有没有配
+        id: check
+        env:
+          # 走 env 而不是直接插进 shell 字符串——密钥里可能有特殊字符
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$LLM_API_KEY" ]; then
+            echo "没配 LLM_API_KEY，跳过。配好之后这个任务才会真的跑。"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.ready == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖
+        if: steps.check.outputs.ready == 'true'
+        run: pip install -r requirements.txt
+
+      - name: 挑出改动过的源码文件
+        if: steps.check.outputs.ready == 'true'
+        id: targets
+        run: |
+          BASE="origin/${{ github.base_ref || 'main' }}"
+          git fetch --no-tags origin "${{ github.base_ref || 'main' }}" || true
+          # 只挑新增/修改的 .py，并且排掉测试文件本身与 conftest
+          mapfile -t files < <(
+            git diff --name-only --diff-filter=AM "$BASE...HEAD" -- '*.py' \
+              | grep -vE '(^|/)(tests?|test_)|(^|/)test_.*\.py$|_test\.py$|conftest\.py$' \
+              || true
+          )
+          printf '%s\n' "${files[@]}" | sed '/^$/d' > /tmp/targets.txt
+          echo "count=$(wc -l < /tmp/targets.txt)" >> "$GITHUB_OUTPUT"
+          echo "要处理的文件："; cat /tmp/targets.txt
+
+      - name: 生成测试
+        if: steps.check.outputs.ready == 'true' && steps.targets.outputs.count != '0'
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL_ID: ${{ vars.LLM_MODEL_ID }}
+          AGENT_CODE_ROOT: ${{ runner.temp }}/agentcode-sandbox
+          # 沙箱执行：CI 的 runner 有 docker，用容器隔离比本机直跑稳
+          AGENT_EXECUTION_BACKEND: docker
+          AGENT_DOCKER_IMAGE: python:3.13-slim
+        run: |
+          mkdir -p generated
+          status=0
+          while read -r file; do
+            [ -z "$file" ] && continue
+            echo "=== $file ==="
+            # 助手定位：写不出测试不拦 PR，但退出码如实记下来
+            python -m agentcode test-gen "$file" --out generated || status=1
+          done < /tmp/targets.txt
+          echo "退出码：$status"
+          exit 0
+
+      - name: 汇总
+        if: steps.check.outputs.ready == 'true'
+        run: |
+          {
+            echo "## 测试生成结果"
+            echo
+            if [ "${{ steps.targets.outputs.count }}" = "0" ]; then
+              echo "这次没有改动到源码文件，跳过。"
+            else
+              echo "改动过的源码文件：${{ steps.targets.outputs.count }} 个。"
+              echo
+              echo "生成的测试在下面的 **agentcode-generated-tests** artifact 里。"
+              echo "下载解压后**请自己审一遍**再合并——模型写的测试也是代码。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传生成的测试
+        if: steps.check.outputs.ready == 'true' && steps.targets.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentcode-generated-tests
+          path: generated/
+          if-no-files-found: ignore
+          retention-days: 14
