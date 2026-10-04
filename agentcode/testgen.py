@@ -112,25 +112,40 @@ class GenerationResult:
         }
 
 
-def _find_written_test(workspace: Path, stem: str, *, since: float) -> Path | None:
-    """在工作目录里找 agent 刚写出来的测试文件。
-
-    优先按约定找 ``test_<stem>.py``；模型要是起了别的名字，就退一步找
-    最新写出来的那个 ``test_*.py``——总比白跑一趟强。
-    """
-    preferred = workspace / f"test_{stem}.py"
-    if preferred.is_file():
-        return preferred
-    fresh: list[Path] = []
+def _snapshot_tests(workspace: Path) -> dict[Path, tuple[int, int]]:
+    """记下工作目录里现有的测试文件（修改时间纳秒 + 大小）。"""
+    snapshot: dict[Path, tuple[int, int]] = {}
     for candidate in workspace.glob("test_*.py"):
         try:
-            if candidate.is_file() and candidate.stat().st_mtime >= since:
-                fresh.append(candidate)
+            stat = candidate.stat()
         except OSError:
             continue
+        snapshot[candidate] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _find_written_test(
+    workspace: Path, stem: str, *, before: dict[Path, tuple[int, int]]
+) -> Path | None:
+    """在工作目录里找 agent **刚写出来**的测试文件。
+
+    优先按约定找 ``test_<stem>.py``；模型要是起了别的名字，就退一步找新出现的
+    那个 ``test_*.py``——总比白跑一趟强。
+
+    这里**不能**用 ``st_mtime >= time.time()`` 判断"是不是刚写的"：文件时间戳
+    走的是粗粒度时钟，可能比同一瞬间的 ``time.time()`` 早几毫秒，于是刚写好的
+    文件会被判成"旧的"。这个坑在 Windows 上碰不到，一到 Linux 就现形。
+    改成跑之前拍快照、跑完比差异，就没有时钟粒度的问题。
+    """
+    after = _snapshot_tests(workspace)
+    fresh = [path for path, state in after.items() if before.get(path) != state]
+
+    preferred = workspace / f"test_{stem}.py"
+    if preferred in fresh:
+        return preferred
     if not fresh:
         return None
-    return max(fresh, key=lambda item: item.stat().st_mtime)
+    return max(fresh, key=lambda item: after[item][0])
 
 
 def generate_for(
@@ -156,7 +171,7 @@ def generate_for(
             reason=f"{dest.name} 已经存在，跳过（要覆盖请加 --force）",
         )
 
-    before = time.time()
+    before = _snapshot_tests(workdir)
     shutil.copyfile(src, workdir / src.name)
     task = (
         f"为 {src.name} 生成 pytest 测试用例，覆盖正常路径与边界情况。"
@@ -169,7 +184,7 @@ def generate_for(
         reason = getattr(outcome, "error", None) or "智能体没有跑通"
         return GenerationResult(src, dest, "failed", reason=str(reason), duration_ms=duration)
 
-    produced = _find_written_test(workdir, src.stem, since=before)
+    produced = _find_written_test(workdir, src.stem, before=before)
     if produced is None:
         return GenerationResult(
             src,
