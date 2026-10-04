@@ -43,6 +43,17 @@ const els = {
   billingUsageText: document.getElementById("billing-usage-text"),
   billingPlans: document.getElementById("billing-plans"),
   billingOrders: document.getElementById("billing-orders"),
+  dataToggle: document.getElementById("data-toggle"),
+  dataPanel: document.getElementById("data-panel"),
+  dataClose: document.getElementById("data-close"),
+  dataExport: document.getElementById("data-export"),
+  dataPurge: document.getElementById("data-purge"),
+  dataDelete: document.getElementById("data-delete"),
+  dataConfirm: document.getElementById("data-confirm"),
+  dataConfirmName: document.getElementById("data-confirm-name"),
+  dataConfirmInput: document.getElementById("data-confirm-input"),
+  dataConfirmCancel: document.getElementById("data-confirm-cancel"),
+  dataConfirmOk: document.getElementById("data-confirm-ok"),
   uploadButton: document.getElementById("upload-button"),
   uploadInput: document.getElementById("upload-input"),
   uploadChips: document.getElementById("upload-chips"),
@@ -97,8 +108,13 @@ async function postJSON(path, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload || {}),
   });
-  if (!response.ok) throw new Error(`服务返回了 ${response.status}`);
-  return response.json();
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    // 把服务端写好的中文原因带出来。不这样做的话，用户只看到"服务返回了 400"，
+    // 而真正的原因（"请输入你自己的用户名以确认注销"）被丢在半路。
+    throw new Error(data.error || `服务返回了 ${response.status}`);
+  }
+  return data;
 }
 
 /* ------------------------------------------------------------ 登录与账号 */
@@ -1007,6 +1023,66 @@ els.billingToggle.addEventListener("click", openBilling);
 els.billingClose.addEventListener("click", () => {
   els.billingPanel.hidden = true;
 });
+
+// ------------------------------------------------------------ 我的数据
+
+/**
+ * 导出、清空代码目录、注销账号。
+ *
+ * 这一步的意义不只是"合规"：没有导出能力的话，"删除"就是单向门，
+ * 用户不敢按。
+ */
+function openDataPanel() {
+  els.dataPanel.hidden = false;
+  els.dataConfirm.hidden = true;
+  els.dataConfirmInput.value = "";
+  els.dataConfirmName.textContent = (state.account && state.account.name) || "";
+}
+
+function exportMyData() {
+  // 走浏览器原生下载：服务端带 Content-Disposition: attachment
+  window.location.href = "/api/export";
+  els.runStatus.textContent = "正在打包下载…";
+}
+
+async function purgeMyCode() {
+  if (!window.confirm("清空代码目录？你上传的文件和智能体生成的文件都会被删掉，会话记录保留。")) {
+    return;
+  }
+  try {
+    const payload = await postJSON("/api/account/purge-code", {});
+    els.runStatus.textContent = `已清空代码目录（删了 ${payload.removed} 个文件）。`;
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+  }
+}
+
+async function confirmDeleteAccount() {
+  try {
+    await postJSON("/api/account/delete", { confirm: els.dataConfirmInput.value });
+    // 账号已经没了，留在这个页面没有意义
+    window.location.href = "/";
+  } catch (error) {
+    // 用户名打错时把服务端的原因显示出来（"请输入你自己的用户名…"）
+    els.runStatus.textContent = error.message;
+  }
+}
+
+els.dataToggle.addEventListener("click", openDataPanel);
+els.dataClose.addEventListener("click", () => {
+  els.dataPanel.hidden = true;
+});
+els.dataExport.addEventListener("click", exportMyData);
+els.dataPurge.addEventListener("click", purgeMyCode);
+els.dataDelete.addEventListener("click", () => {
+  els.dataConfirm.hidden = false;
+  els.dataConfirmInput.focus();
+});
+els.dataConfirmCancel.addEventListener("click", () => {
+  els.dataConfirm.hidden = true;
+  els.dataConfirmInput.value = "";
+});
+els.dataConfirmOk.addEventListener("click", confirmDeleteAccount);
 
 // ------------------------------------------------------ 侧栏布局：折叠与调宽
 

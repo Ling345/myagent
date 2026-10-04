@@ -57,6 +57,7 @@
           <span class="account-name" id="account-name"></span>
           <span class="account-quota" id="account-quota"></span>
           <button type="button" id="billing-toggle" class="link">套餐与用量</button>
+          <button type="button" id="data-toggle" class="link">我的数据</button>
           <button type="button" id="logout-button" class="link">退出</button>
         </div>
 
@@ -73,6 +74,43 @@
           <div class="billing-plans" id="billing-plans"></div>
           <ul class="billing-orders" id="billing-orders"></ul>
         </section>
+
+        <section id="data-panel" class="billing-panel" hidden>
+          <header class="billing-head">
+            <strong>我的数据</strong>
+            <span class="billing-expiry">随时导出或删除</span>
+            <button type="button" id="data-close" class="icon" aria-label="关闭">✕</button>
+          </header>
+          <p class="billing-usage-text">
+            导出会把你的全部会话和代码目录打包成 zip。删除是不可撤销的。
+          </p>
+          <div class="data-actions">
+            <button type="button" id="data-export" class="data-button">导出我的数据</button>
+            <button type="button" id="data-purge" class="data-button">清空代码目录</button>
+            <button type="button" id="data-delete" class="data-button is-danger">
+              注销账号…
+            </button>
+          </div>
+          <div id="data-confirm" class="data-confirm" hidden>
+            <p class="billing-usage-text">
+              这会删掉你的账号、全部会话、全部代码与上传的文件，<strong>不可撤销</strong>。
+              输入你的用户名 <code id="data-confirm-name"></code> 以确认：
+            </p>
+            <input id="data-confirm-input" autocomplete="off" />
+            <div class="data-confirm-row">
+              <button type="button" id="data-confirm-cancel" class="data-button">取消</button>
+              <button type="button" id="data-confirm-ok" class="data-button is-danger">
+                确认注销
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <p class="legal-links">
+          <a href="/privacy" target="_blank" rel="noopener">隐私政策</a>
+          ·
+          <a href="/terms" target="_blank" rel="noopener">用户协议</a>
+        </p>
       </aside>
 
       <div

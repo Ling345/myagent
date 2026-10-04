@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>隐私政策 · AgentCode</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/legal.css" />
+  </head>
+  <body>
+    <main>
+      <h1>隐私政策</h1>
+      <p class="meta">最后更新：2026 年 10 月 4 日</p>
+
+      <p>
+        这份政策说明 AgentCode（以下简称"本服务"）会收集你的哪些数据、用来做什么、
+        会给到谁、存多久，以及你可以怎么导出和删除它们。
+      </p>
+
+      <h2>一、谁在运营</h2>
+      <p>
+        本服务由 <strong>吴咏翰</strong>（个人）运营。有任何与数据相关的问题，
+        联系 <a href="mailto:824346648@qq.com">824346648@qq.com</a>。
+      </p>
+
+      <h2>二、我们收集什么</h2>
+      <table>
+        <tr>
+          <th>数据</th>
+          <th>具体是什么</th>
+        </tr>
+        <tr>
+          <td>账号</td>
+          <td>你设置的用户名、密码（<strong>只存不可逆的哈希</strong>，我们看不到明文）、套餐与用量记录</td>
+        </tr>
+        <tr>
+          <td>对话内容</td>
+          <td>你在页面上输入的任务描述，以及智能体给出的回答</td>
+        </tr>
+        <tr>
+          <td>文件</td>
+          <td>你主动上传的文件，以及智能体在执行任务过程中生成的文件与测试代码</td>
+        </tr>
+        <tr>
+          <td>运行记录</td>
+          <td>每次任务用了多少 token、调用了哪些工具、耗时多久（用于计费与排障）</td>
+        </tr>
+        <tr>
+          <td>登录态</td>
+          <td>一个签名的 Cookie。它只用来判断"你是谁"，不含任何个人信息，也不用于广告追踪</td>
+        </tr>
+      </table>
+
+      <div class="callout">
+        <strong>我们不使用第三方广告或分析脚本</strong>，页面上没有任何追踪像素。
+        上面这些就是全部。
+      </div>
+
+      <h2>三、这些数据会给到谁</h2>
+      <table>
+        <tr>
+          <th>接收方</th>
+          <th>拿到什么</th>
+          <th>为什么</th>
+        </tr>
+        <tr>
+          <td><strong>大语言模型服务商</strong></td>
+          <td>
+            <strong>你的任务描述，以及智能体读到的文件内容</strong>（例如你上传的源码）
+          </td>
+          <td>
+            智能体要把这些内容发给模型才能干活。具体是哪家服务商取决于本实例的部署配置，
+            你可以向运营方询问；它们的处理规则适用各自的服务条款与隐私政策
+          </td>
+        </tr>
+        <tr>
+          <td>服务器托管商</td>
+          <td>磁盘上的数据（托管方在物理层面能看到，但我们不会主动共享）</td>
+          <td>本服务跑在租用的服务器上</td>
+        </tr>
+      </table>
+
+      <div class="callout">
+        <strong>请不要上传你无权分享的内容</strong>——包括他人的隐私数据、商业机密、
+        以及你不希望被模型服务商处理的东西。发送给模型的内容，我们无法替你把关。
+      </div>
+
+      <p><strong>我们不会出售你的数据。</strong></p>
+
+      <h2>四、存多久</h2>
+      <p>
+        <strong>默认保留到你主动删除。</strong>我们不会因为"时间到了"就替你清掉——
+        你的对话和文件什么时候该消失，由你决定。
+      </p>
+      <p>
+        如果本实例的运营方配置了自动清理（环境变量 <code>AGENT_RETENTION_DAYS</code>），
+        那么超过该天数的会话与代码文件会被自动删除。你可以向运营方确认这项设置。
+      </p>
+
+      <h2>五、你可以做什么</h2>
+      <table>
+        <tr>
+          <th>权利</th>
+          <th>怎么做</th>
+        </tr>
+        <tr>
+          <td><strong>导出</strong></td>
+          <td>网页左下角「我的数据 → 导出」会把你的全部会话和代码目录打包成 zip 下载</td>
+        </tr>
+        <tr>
+          <td><strong>删除单个会话</strong></td>
+          <td>左侧会话列表上点 ✕</td>
+        </tr>
+        <tr>
+          <td><strong>清空代码目录</strong></td>
+          <td>「我的数据 → 清空代码目录」删除你上传的和智能体生成的全部文件</td>
+        </tr>
+        <tr>
+          <td><strong>注销账号</strong></td>
+          <td>
+            「我的数据 → 注销账号」会删除你的账号、全部会话、全部代码与上传文件。
+            <strong>此操作不可撤销</strong>，所以需要输入用户名二次确认
+          </td>
+        </tr>
+      </table>
+      <p>也可以直接发邮件给上面的地址，我们会在合理期限内处理。</p>
+
+      <h2>六、安全</h2>
+      <p>
+        密码以 PBKDF2-SHA256 加盐哈希保存，我们看不到明文。智能体执行代码时，
+        代码运行在隔离的容器里（无网络、只读根文件系统、以非 root 身份运行）。
+        但请理解：<strong>没有任何系统能保证绝对安全</strong>，请不要把本服务当作
+        存放高敏感数据的地方。
+      </p>
+
+      <h2>七、政策的变更</h2>
+      <p>
+        如果这份政策有实质性变化，我们会更新本页顶部的日期。继续使用本服务，
+        即表示你接受更新后的政策。
+      </p>
+
+      <p style="margin-top: 32px">
+        <a href="/">← 返回 AgentCode</a>
+      </p>
+    </main>
+    <footer>AgentCode · 吴咏翰 · 824346648@qq.com</footer>
+  </body>
+</html>

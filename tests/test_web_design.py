@@ -126,6 +126,49 @@ def test_upload_chips_are_hidden_until_something_is_uploaded():
     assert ".upload-chips[hidden] { display: none; }" in css
 
 
+# ------------------------------------------------------------ 我的数据
+
+
+def test_data_panel_exists_in_markup():
+    html = _html()
+    assert 'id="data-panel"' in html
+    assert 'id="data-toggle"' in html
+    assert 'id="data-export"' in html
+    assert 'id="data-purge"' in html
+    assert 'id="data-delete"' in html
+
+
+def test_delete_needs_a_typed_confirmation():
+    """注销不可撤销，所以要在界面上真的让用户打一遍用户名。"""
+    html = _html()
+    assert 'id="data-confirm-input"' in html
+    assert 'id="data-confirm-ok"' in html
+    assert 'id="data-confirm-name"' in html
+    assert "不可撤销" in html
+
+
+def test_data_panel_script_uses_the_endpoints():
+    js = _js()
+    assert "/api/export" in js
+    assert "/api/account/purge-code" in js
+    assert "/api/account/delete" in js
+
+
+def test_legal_pages_are_linked_from_the_sidebar():
+    html = _html()
+    assert 'href="/privacy"' in html
+    assert 'href="/terms"' in html
+
+
+def test_post_errors_surface_the_servers_message():
+    """回归：postJSON 原来在非 2xx 时直接抛"服务返回了 400"，
+    把服务端写好的中文原因（比如"请输入你自己的用户名以确认注销"）丢在半路——
+    用户填错名字时页面上什么提示都没有。"""
+    js = _js()
+    assert "data.error ||" in js
+    assert "服务返回了 ${response.status}" in js
+
+
 def test_page_has_flowing_background_layer():
     assert 'class="flow"' in _html()
     assert "drift-a" in _css()

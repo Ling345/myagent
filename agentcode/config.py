@@ -75,6 +75,8 @@ DEFAULT_ALERT_ERROR_RATE = 0.5
 #: 文件上传：单个文件上限、每个用户工作目录总上限
 DEFAULT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_UPLOAD_QUOTA_BYTES = 50 * 1024 * 1024
+#: 自动清理：会话与代码文件留多久。0 = 不自动清理（默认，删不删由用户自己决定）
+DEFAULT_RETENTION_DAYS = 0
 
 
 def mask_secret(value: str | None) -> str:
@@ -171,6 +173,8 @@ class Settings:
     upload_quota_bytes: int = DEFAULT_UPLOAD_QUOTA_BYTES
     #: 抓指标用的令牌；设了之后 /metrics 允许带它免登录访问
     metrics_token: str | None = None
+    #: 自动清理：会话与代码文件留多久。0 = 不自动清理
+    retention_days: int = DEFAULT_RETENTION_DAYS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -270,6 +274,7 @@ class Settings:
                 pick("AGENT_UPLOAD_QUOTA_BYTES"), DEFAULT_UPLOAD_QUOTA_BYTES
             ),
             metrics_token=pick("AGENT_METRICS_TOKEN"),
+            retention_days=_to_int(pick("AGENT_RETENTION_DAYS"), DEFAULT_RETENTION_DAYS),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -371,6 +376,9 @@ class Settings:
             "AGENT_UPLOAD_MAX_BYTES": str(self.upload_max_bytes),
             "AGENT_UPLOAD_QUOTA_BYTES": str(self.upload_quota_bytes),
             "AGENT_METRICS_TOKEN": mask_secret(self.metrics_token),
+            "AGENT_RETENTION_DAYS": str(self.retention_days) + (
+                "（不自动清理）" if self.retention_days <= 0 else ""
+            ),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
