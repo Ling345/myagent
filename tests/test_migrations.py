@@ -7,7 +7,12 @@ import sqlite3
 import pytest
 
 from agentcode.core.errors import MigrationError
-from agentcode.storage.migrations import Migration, current_version, run_migrations
+from agentcode.storage.migrations import (
+    MIGRATIONS,
+    Migration,
+    current_version,
+    run_migrations,
+)
 
 
 def _connect(tmp_path) -> sqlite3.Connection:
@@ -165,3 +170,32 @@ def test_v2_ledger_has_the_expected_columns(tmp_path):
     run_migrations(conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_ledger)")}
     assert {"account_id", "day", "created_at", "tokens", "calls", "run_id", "note"} <= columns
+
+
+# ---------------------------------------------------------------- v3：输入输出分开记
+
+
+def test_v3_adds_the_token_split_columns(tmp_path):
+    """计价靠它：输入和输出的单价差好几倍，只记总数换算不出钱。"""
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_ledger)")}
+    assert {"prompt_tokens", "completion_tokens"} <= columns
+
+
+def test_v3_leaves_old_rows_without_a_split(tmp_path):
+    """老数据只有总数，拆不出来——留空，别瞎猜。"""
+    conn = _connect(tmp_path)
+    run_migrations(conn, [m for m in MIGRATIONS if m.version <= 2])
+    conn.execute(
+        "INSERT INTO usage_ledger (account_id, day, created_at, tokens, calls)"
+        " VALUES ('a1', '2026-09-20', '2026-09-20T00:00:00+00:00', 100, 1)"
+    )
+    conn.commit()
+
+    run_migrations(conn)
+
+    row = conn.execute("SELECT tokens, prompt_tokens, completion_tokens FROM usage_ledger").fetchone()
+    assert row[0] == 100
+    assert row[1] is None
+    assert row[2] is None

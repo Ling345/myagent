@@ -1016,6 +1016,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                     int(usage.get("total_tokens") or 0),
                     calls=1,
                     run_id=finished.id,
+                    # 输入/输出分开记：计价靠它（两者单价差好几倍）
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
                 )
             self.server.guard.release(guard_key)  # type: ignore[attr-defined]
 

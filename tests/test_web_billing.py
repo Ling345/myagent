@@ -98,6 +98,10 @@ def test_run_records_the_run_id_in_the_ledger(web):
     rows = accounts.ledger_rows(account.id)
     assert rows, "跑完后账本里应该有记录"
     assert rows[0]["run_id"], "账本要能追到具体是哪次运行"
+    # 输入/输出要分开记——计价靠它
+    assert rows[0]["prompt_tokens"] is not None
+    assert rows[0]["completion_tokens"] is not None
+    assert rows[0]["prompt_tokens"] + rows[0]["completion_tokens"] == rows[0]["tokens"]
 
 
 # ---------------------------------------------------------------- 配额

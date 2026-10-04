@@ -287,18 +287,25 @@ class AccountStore:
         *,
         run_id: str | None = None,
         note: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ) -> None:
         """往账本里记一笔用量。
 
         账本是**唯一的用量事实来源**：老那张 ``usage`` 日计数器只读不写了
         （保留是为了回滚，不是为了查询）。
+
+        ``prompt_tokens`` / ``completion_tokens`` 可选，但建议传——LLM 的输入
+        和输出单价差好几倍，只记总数就换算不出钱。拿不到拆分时留空，
+        别拿比例硬凑一个。
         """
         now = datetime.now(timezone.utc)
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO usage_ledger"
-                " (account_id, day, created_at, tokens, calls, run_id, note)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " (account_id, day, created_at, tokens, calls, run_id, note,"
+                "  prompt_tokens, completion_tokens)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     account_id,
                     now.date().isoformat(),
@@ -307,6 +314,8 @@ class AccountStore:
                     max(0, int(calls)),
                     run_id,
                     note,
+                    None if prompt_tokens is None else max(0, int(prompt_tokens)),
+                    None if completion_tokens is None else max(0, int(completion_tokens)),
                 ),
             )
 
@@ -314,11 +323,39 @@ class AccountStore:
         """最近的账本明细，新的排前面。"""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT day, created_at, tokens, calls, run_id, note FROM usage_ledger"
+                "SELECT day, created_at, tokens, calls, run_id, note,"
+                " prompt_tokens, completion_tokens FROM usage_ledger"
                 " WHERE account_id = ? ORDER BY id DESC LIMIT ?",
                 (account_id, max(1, int(limit))),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def usage_breakdown(
+        self, account_id: str, start_day: str, end_day: str
+    ) -> dict[str, int]:
+        """闭区间内的用量明细：输入、输出、总数、调用次数。
+
+        ``rows_without_split`` / ``unsplit_tokens`` 是给"老数据"留的口子：
+        那些行只记了总数（v3 迁移之前的），拆不出输入输出，计价时得单独处理，
+        不能假装它们不存在。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(tokens), 0) AS total_tokens,
+                    COALESCE(SUM(calls), 0) AS calls,
+                    COUNT(CASE WHEN prompt_tokens IS NULL THEN 1 END) AS rows_without_split,
+                    COALESCE(SUM(CASE WHEN prompt_tokens IS NULL THEN tokens ELSE 0 END), 0)
+                        AS unsplit_tokens
+                FROM usage_ledger
+                WHERE account_id = ? AND day BETWEEN ? AND ?
+                """,
+                (account_id, start_day, end_day),
+            ).fetchone()
+        return {key: int(row[key]) for key in row.keys()}
 
     def usage_between(self, account_id: str, start_day: str, end_day: str) -> tuple[int, int]:
         """闭区间的用量汇总（按 UTC 日期）。"""

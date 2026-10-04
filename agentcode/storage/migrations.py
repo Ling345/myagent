@@ -160,10 +160,24 @@ def _v2_billing(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v3_usage_split(conn: sqlite3.Connection) -> None:
+    """账本分开记输入与输出 token。
+
+    为什么需要：LLM 的输入和输出单价差好几倍（输出通常贵 2–4 倍），
+    只记一个总数根本换算不出钱——"这个用户花了多少钱"就成了拍脑袋。
+
+    老数据只有总数，拆不出来，所以两列留空。计价时按 `unknown_split` 处理，
+    而不是瞎猜一个比例。
+    """
+    add_column(conn, "usage_ledger", "prompt_tokens", "INTEGER")
+    add_column(conn, "usage_ledger", "completion_tokens", "INTEGER")
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
     Migration(2, "套餐字段、用量账本与订单", _v2_billing),
+    Migration(3, "用量账本分开记输入/输出 token", _v3_usage_split),
 ]
 
 
