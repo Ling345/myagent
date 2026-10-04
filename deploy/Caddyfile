@@ -1,0 +1,24 @@
+# Caddy 反向代理：一个文件搞定 HTTPS（证书自动申请、自动续期）。
+#
+# AGENTCODE_DOMAIN 由 docker-compose 传进来：
+#   - 设成你的域名（example.com）→ Caddy 自动申请证书并强制 HTTPS
+#   - 不设（默认 :80）→ 只监听 80，用 IP 就能访问，方便先在服务器上试
+
+{$AGENTCODE_DOMAIN} {
+	encode zstd gzip
+
+	# 反向代理到应用容器。compose 里服务名就是 app，容器内端口 8000。
+	reverse_proxy app:8000 {
+		# SSE 是流式的，不能让代理攒着再发，否则页面要等很久才出结果
+		flush_interval -1
+	}
+
+	# 访问日志：排查问题时看这个
+	log {
+		output stdout
+	}
+
+	# 别把运行数据暴露出去
+	@blocked path /traces/* /data/*
+	respond @blocked 404
+}

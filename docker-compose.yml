@@ -1,0 +1,80 @@
+# 一套 compose 把 AgentCode 拉起来。
+#
+# 用法（在项目根目录）：
+#   1. 先把沙箱镜像建好——它不在这个文件里，因为它是"被应用调用"的另一个镜像：
+#        docker build -t agentcode-sandbox:1.0 docker/sandbox
+#   2. 复制 .env.example 为 deploy/.env，填上 LLM_API_KEY / AGENT_SECRET_KEY
+#   3. docker compose up -d
+#
+# 想让外网通过域名 + HTTPS 访问，再加一个 --profile public（需要先设 AGENTCODE_DOMAIN）。
+#
+# 为什么密钥文件放在 deploy/ 而不是项目根目录：本地开发时 Settings 会从当前目录
+# 向上找 .env，根目录放一个会把你 D:\agent\.env 里的本地配置遮掉。
+
+name: agentcode
+
+services:
+  app:
+    build: .
+    image: agentcode-app:local
+    restart: unless-stopped
+    env_file:
+      # 可选：没有这个文件也能起（配置全从下面的 environment 或 shell 环境来）
+      - path: deploy/.env
+        required: false
+    environment:
+      # 容器里的固定值。显式写在这里，是为了盖掉 .env 里那套"本机开发用"的设置
+      # （比如你本地可能是 AGENT_DOCKER_BINARY=wsl -d Ubuntu -- docker）。
+      AGENT_EXECUTION_BACKEND: docker
+      AGENT_DOCKER_BINARY: docker
+      AGENT_DOCKER_IMAGE: agentcode-sandbox:1.0
+      # 数据全部落在同一个挂载点上，路径与宿主机**完全一致**（见下面的说明）
+      AGENT_DB_PATH: ${AGENTCODE_DATA:-/srv/agentcode/data}/agentcode.db
+      AGENT_WEB_SESSION_DIR: ${AGENTCODE_DATA:-/srv/agentcode/data}/web-sessions
+      AGENT_CODE_ROOT: ${AGENTCODE_DATA:-/srv/agentcode/data}/sandbox
+      AGENT_TRACE_DIR: ${AGENTCODE_DATA:-/srv/agentcode/data}/traces
+    volumes:
+      # 为什么两边路径要写成一样：应用是通过宿主 Docker 去起**兄弟容器**执行代码的，
+      # 而兄弟容器看到的路径是**宿主机**的路径。如果应用里是 /data/sandbox、
+      # 宿主上是 /srv/agentcode/data/sandbox，那沙箱挂载就会指向一个不存在的目录。
+      # 用同名路径挂载，这一层歧义就没了。
+      - ${AGENTCODE_DATA:-/srv/agentcode/data}:${AGENTCODE_DATA:-/srv/agentcode/data}
+      # 应用要起兄弟容器，就必须能调宿主的 Docker。
+      # 代价见 docs/deploy.md「安全上的取舍」那一节。
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      # 只监听本机。公网入口交给下面的 Caddy，或者你自己的反向代理。
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # 可选：域名 + 自动 HTTPS。要它就用 --profile public 起。
+  caddy:
+    image: caddy:2
+    profiles: ["public"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 没设就退化成"只监听 80、用 IP 访问"，方便先在服务器上试
+      AGENTCODE_DOMAIN: ${AGENTCODE_DOMAIN:-:80}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
