@@ -218,6 +218,23 @@ class AccountStore:
             )
         return cursor.rowcount > 0
 
+    def delete_account(self, account_id: str) -> bool:
+        """从账号库里彻底删掉一个账号，连同它的用量账本与订单。
+
+        **磁盘上的会话与代码目录不在这里删**——那部分归
+        :func:`agentcode.lifecycle.delete_account_data`。两件事要一起做才叫注销，
+        所以调用方应该用 ``lifecycle`` 里的编排，而不是单独调这一个。
+        """
+        cleaned = str(account_id or "").strip()
+        if not cleaned:
+            return False
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM usage_ledger WHERE account_id = ?", (cleaned,))
+            self._conn.execute("DELETE FROM usage WHERE account_id = ?", (cleaned,))
+            self._conn.execute("DELETE FROM orders WHERE account_id = ?", (cleaned,))
+            cursor = self._conn.execute("DELETE FROM accounts WHERE id = ?", (cleaned,))
+        return cursor.rowcount > 0
+
     def set_limit(self, name: str, daily_token_limit: int) -> bool:
         """调整某个账号的每日额度。
 
