@@ -142,6 +142,21 @@ def test_logout_works_without_body(web):
     assert client.get("/api/me")[0] == 401
 
 
+def test_logout_with_a_body_still_returns_cleanly(web):
+    """回归：登出是"不读 body 就直接回 200"，而客户端可能带着 body 来
+    （有些前端库的 POST 一律带 `{}`）。不读就关连接的话，客户端拿到的是
+    ConnectionAbortedError 而不是 200——这个 bug 在测试里是偶发的。"""
+    base, accounts, _ = web
+    accounts.create("alice", "password123")
+    client = Client(base)
+    client.post("/api/login", {"name": "alice", "password": "password123"})
+    assert client.get("/api/me")[0] == 200
+
+    for _ in range(10):
+        status, _payload = client.post("/api/logout", {"随便": "带点东西"})
+        assert status == 200
+
+
 def test_tampered_cookie_is_rejected(web):
     base, accounts, _ = web
     accounts.create("alice", "password123")

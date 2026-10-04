@@ -804,6 +804,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/logout":
             # 登出不需要请求体：必须在读 body 之前处理，否则空 body 会被判 400
+            # （但还是要把它读掉——见 _drain_body 的说明）
+            self._drain_body()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Set-Cookie", clear_cookie())
