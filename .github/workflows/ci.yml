@@ -54,3 +54,49 @@ jobs:
           docker run --rm --network none --read-only --user 65534:65534 \
             --tmpfs /tmp:size=32m agentcode-sandbox:ci \
             python -c "import os, pytest; assert os.getuid() == 65534; print('sandbox ok, pytest', pytest.__version__)"
+
+  app-image:
+    name: 构建并冒烟测试应用镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建应用镜像
+        run: docker build -t agentcode-app:ci .
+
+      # 三件事都要真的成立，否则部署那天才发现：
+      #   1. 容器起得来、/healthz 通
+      #   2. 镜像里带 docker CLI（应用要靠它起沙箱的兄弟容器）
+      #   3. 默认绑的是 0.0.0.0（默认 127.0.0.1 的话容器外根本进不来）
+      - name: 冒烟测试
+        run: |
+          docker run -d --name app agentcode-app:ci
+          ok=0
+          for _ in $(seq 1 30); do
+            if docker exec app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)" 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then
+            echo "健康检查失败，容器日志："
+            docker logs app
+            exit 1
+          fi
+          echo "健康检查通过"
+          docker exec app docker --version
+          docker exec -i app python - <<'PY'
+          # 真检查：监听地址在 /proc/net/tcp 里长这样 00000000:1F40（0.0.0.0:8000）
+          import re
+
+          with open("/proc/net/tcp", encoding="utf-8") as handle:
+              rows = [line.split() for line in handle.readlines()[1:]]
+          listening = {row[1] for row in rows if row[3] == "0A"}  # 0A = LISTEN
+          print("监听中:", sorted(listening))
+          assert any(addr.startswith("00000000") for addr in listening), (
+              "应用没有监听 0.0.0.0，容器外访问不到"
+          )
+          print("确认监听 0.0.0.0")
+          PY
+          docker rm -f app

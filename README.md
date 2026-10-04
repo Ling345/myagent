@@ -664,11 +664,31 @@ def add(a: str, b: str) -> str:
 | `AGENT_ALERT_ERROR_RATE` | 否 | `0.5` | 错误率阈值 |
 | `AGENT_UPLOAD_MAX_BYTES` | 否 | `2097152` | 单个上传文件的上限（2 MB） |
 | `AGENT_UPLOAD_QUOTA_BYTES` | 否 | `52428800` | 每个用户代码目录的总量上限（50 MB） |
+| `AGENT_METRICS_TOKEN` | 否 | 无 | 抓指标用的令牌；容器里必须绑 0.0.0.0，靠它免登录抓取 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖上面的数值型字段，
 网页也可以用 `web_host`、`web_port`、`llm_mode` 设默认值（`llm_mode` 默认 `openai`）。
 `.env` 的查找顺序是：显式传入的路径 → 当前目录向上最多三层 → 进程环境变量。
+
+## 部署到服务器
+
+整个服务用 Docker 部署，服务器上不用装 Python：
+
+```bash
+docker build -t agentcode-sandbox:1.0 docker/sandbox   # 沙箱镜像（被调用的那个）
+cp .env.example deploy/.env && nano deploy/.env        # 填密钥
+export AGENTCODE_DATA=/srv/agentcode/data              # 必须是绝对路径
+docker compose up -d
+```
+
+完整步骤（含 HTTPS、备份、升级回滚、以及那个绕不开的安全取舍）见
+[`docs/deploy.md`](docs/deploy.md)。两件事值得先知道：
+
+- 应用容器挂了宿主机的 `docker.sock`——因为它要靠宿主 Docker 起沙箱的**兄弟容器**。
+  代价与更安全的替代方案都写在部署文档里。
+- 数据（账号库、会话、每个用户的代码目录）全部落在 `$AGENTCODE_DATA` 一个目录下，
+  备份就是备份它。
 
 ## 测试
 

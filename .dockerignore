@@ -1,0 +1,20 @@
+# 构建镜像时不要把这些拷进去
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.idea
+.vscode
+# 运行数据：会话、账号库、代码产物都不该进镜像
+traces
+data
+# 真实密钥绝不进镜像
+.env
+.env.local
+# 部署与文档产物
+docs
+*.log
+*.zip
