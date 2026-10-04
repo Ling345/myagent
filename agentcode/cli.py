@@ -114,6 +114,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-browser", action="store_true", help="只确保服务在运行，不打开浏览器"
     )
 
+    testgen_parser = subparsers.add_parser(
+        "test-gen", help="给源码文件补 pytest 测试（放进 CI 就是一道门禁）"
+    )
+    testgen_parser.add_argument("path", help="源码文件或目录")
+    testgen_parser.add_argument("--out", default=None, help="测试写到哪个目录，默认放源文件旁边")
+    testgen_parser.add_argument(
+        "--force", action="store_true", help="已有的测试文件也覆盖（默认跳过）"
+    )
+    testgen_parser.add_argument(
+        "--limit", type=int, default=20, help="一次最多处理几个文件，默认 20"
+    )
+    testgen_parser.add_argument("--dry-run", action="store_true", help="只列出要处理哪些文件")
+    testgen_parser.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    testgen_parser.add_argument(
+        "--llm", choices=["openai", "mock"], default="openai", help="模型后端，mock 供离线演示"
+    )
+    testgen_parser.add_argument("--quiet", action="store_true", help="不打印中间步骤")
+    testgen_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    testgen_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
+
     user_parser = subparsers.add_parser("user", help="管理账号（每个用户一个账号与额度）")
     user_sub = user_parser.add_subparsers(dest="user_command", required=True)
     add_parser = user_sub.add_parser("add", help="新建账号")
@@ -521,6 +541,102 @@ def _billing_command(args: argparse.Namespace) -> int:
     return 2
 
 
+def _testgen_command(args: argparse.Namespace) -> int:
+    """执行 test-gen 子命令：给一批源码文件补 pytest 测试。
+
+    退出码是一道门禁：**0 = 全都成（写好了或者已存在跳过）；1 = 有文件没搞定**。
+    这样放进 CI 里就能拦住"生成了但跑不通"的情况。
+    """
+    from agentcode.testgen import discover_targets, generate_for
+
+    settings = _load_settings(args)
+    targets = discover_targets(args.path, limit=args.limit)
+    if not targets:
+        print(f"没有找到需要生成测试的 Python 文件：{args.path}")
+        return 0
+
+    if args.dry_run:
+        print(f"将为这 {len(targets)} 个文件生成测试（--dry-run，没有真的跑）：")
+        for target in targets:
+            print(f"  {target}")
+        return 0
+
+    if args.llm != "mock":
+        settings.validate()
+
+    workspace = Path(settings.code_root)
+    workspace.mkdir(parents=True, exist_ok=True)
+    runner = _make_testgen_runner(settings, args)
+
+    results = []
+    for target in targets:
+        if not args.json:
+            print(f"→ 正在为 {target.name} 生成测试…")
+        result = generate_for(
+            target,
+            workspace=workspace,
+            run_agent=runner,
+            out_dir=args.out,
+            force=args.force,
+        )
+        results.append(result)
+        if not args.json:
+            icon = {"written": "✓", "skipped": "–", "failed": "✗"}[result.status]
+            detail = f"（{result.reason}）" if result.reason else ""
+            print(f"  {icon} {result.dest}{detail}")
+
+    failed = [item for item in results if item.status == "failed"]
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "results": [item.to_dict() for item in results],
+                    "written": sum(1 for i in results if i.status == "written"),
+                    "skipped": sum(1 for i in results if i.status == "skipped"),
+                    "failed": len(failed),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(_THIN_SEPARATOR)
+        print(
+            f"写好 {sum(1 for i in results if i.status == 'written')} 个，"
+            f"跳过 {sum(1 for i in results if i.status == 'skipped')} 个，"
+            f"失败 {len(failed)} 个"
+        )
+    return 1 if failed else 0
+
+
+def _make_testgen_runner(settings: Settings, args: argparse.Namespace):
+    """造一个"给个任务、跑一遍 test_gen"的函数。
+
+    每个文件都用**全新的 agent 实例**——上一个文件的上下文不该影响下一个。
+    """
+
+    def run_agent(task: str, workspace: Path) -> Any:
+        if args.llm == "mock":
+            llm = demo_responses_llm("test_gen")
+            tools = _build_tools(mock=True, settings=settings, agent_name="test_gen")
+        else:
+            llm = OpenAICompatibleLLM.from_settings(settings)
+            tools = _build_tools(
+                mock=False, settings=settings, agent_name="test_gen", allow_code=True
+            )
+        agent = default_registry.create(
+            "test_gen",
+            llm=llm,
+            tools=tools,
+            middlewares=_build_middlewares(settings, quiet=True),
+            max_steps=settings.max_steps_for("test_gen"),
+            memory=ShortTermMemory(max_turns=settings.memory_turns),
+        )
+        return agent.run(task)
+
+    return run_agent
+
+
 def _web_command(args: argparse.Namespace) -> int:
     """执行 web 子命令：启动本地可视化页面。"""
     from agentcode.web.server import serve
@@ -605,6 +721,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "billing":
             return _billing_command(args)
+
+        if args.command == "test-gen":
+            return _testgen_command(args)
 
         return _run_command(args)
     except ConfigError as exc:
