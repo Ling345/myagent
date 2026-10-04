@@ -74,6 +74,65 @@ def test_reset_usage_clears_the_day(tmp_path):
     assert store.usage_today(account.id) == (0, 0)
 
 
+# ---------------------------------------------------------------- 输入输出分开
+
+
+def test_record_usage_keeps_the_token_split(tmp_path):
+    """计价要用：输入和输出单价差好几倍。"""
+    store = _store(tmp_path)
+    account = store.create("alice", "password123")
+    store.record_usage(
+        account.id, 150, calls=1, prompt_tokens=100, completion_tokens=50
+    )
+
+    row = store.ledger_rows(account.id)[0]
+    assert row["prompt_tokens"] == 100
+    assert row["completion_tokens"] == 50
+    assert row["tokens"] == 150
+
+
+def test_record_usage_without_a_split_still_works(tmp_path):
+    """调用方拿不到拆分时（比如自己估算的用量）也得能记。"""
+    store = _store(tmp_path)
+    account = store.create("alice", "password123")
+    store.record_usage(account.id, 100)
+    row = store.ledger_rows(account.id)[0]
+    assert row["tokens"] == 100
+    assert row["prompt_tokens"] is None
+
+
+def test_usage_breakdown_aggregates_the_split(tmp_path):
+    store = _store(tmp_path)
+    account = store.create("alice", "password123")
+    store.record_usage(account.id, 150, prompt_tokens=100, completion_tokens=50)
+    store.record_usage(account.id, 90, prompt_tokens=80, completion_tokens=10)
+
+    today = store.usage_today(account.id)
+    breakdown = store.usage_breakdown(
+        account.id, "2000-01-01", "2999-12-31"
+    )
+    assert breakdown["prompt_tokens"] == 180
+    assert breakdown["completion_tokens"] == 60
+    assert breakdown["total_tokens"] == today[0] == 240
+    assert breakdown["calls"] == 2
+    assert breakdown["rows_without_split"] == 0
+
+
+def test_usage_breakdown_flags_rows_that_have_no_split(tmp_path):
+    """老数据只有总数，拆不出来——要让调用方知道有多少是估的。"""
+    store = _store(tmp_path)
+    account = store.create("alice", "password123")
+    store.record_usage(account.id, 1000)  # 老式的记法
+    store.record_usage(account.id, 150, prompt_tokens=100, completion_tokens=50)
+
+    breakdown = store.usage_breakdown(account.id, "2000-01-01", "2999-12-31")
+    assert breakdown["prompt_tokens"] == 100
+    assert breakdown["completion_tokens"] == 50
+    assert breakdown["total_tokens"] == 1150
+    assert breakdown["rows_without_split"] == 1
+    assert breakdown["unsplit_tokens"] == 1000
+
+
 def test_legacy_usage_table_is_migrated_into_the_ledger(tmp_path):
     """老库里的日计数器不能凭空消失。
 
