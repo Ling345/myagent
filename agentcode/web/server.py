@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hmac
 import json
 import os
 import secrets
@@ -348,6 +349,25 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return f"user:{account.name}"
         return f"ip:{self.client_address[0] if self.client_address else 'unknown'}"
 
+    def _drain_body(self, limit: int = MAX_BODY_BYTES) -> None:
+        """把请求体读掉。
+
+        在"还没读 body 就要回错误"的路径上必须先调它。不读就回响应的话，
+        客户端还在发数据、服务端已经把连接关了——浏览器拿到的是
+        "连接被中止"而不是真正的状态码，前端连"请先登录"都提示不出来。
+
+        超过 ``limit`` 的请求体不读：那种请求本来就该被拒，被重置也无所谓。
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < length <= limit:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+
     def _reject_by_limit(self, decision: Any) -> None:
         """统一的 429 回应。"""
         reason = "concurrency" if "任务在运行" in str(decision.reason) else "rate_limit"
@@ -373,17 +393,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         走的是"原始 body"而不是 multipart：Python 3.13 已经把 ``cgi`` 删了，
         而我们要的只是纯文本，原始 body 最省事也最不容易出差错。
-        """
-        if not self._auth_ok():
-            return
-        account = getattr(self, "_account", None)
-        settings = self._settings()
 
-        raw_name = (parse_qs(urlsplit(self.path).query).get("path") or [""])[0]
-        name = safe_upload_name(raw_name)
-        if name is None:
-            self._send_json({"error": "文件名不合法。"}, status=400)
-            return
+        注意顺序：**先把 body 读掉，再判登录**。不读就回 401 的话，客户端还在发
+        数据、服务端已经关连接，浏览器拿到的是"连接被中止"而不是 401——
+        前端就没法提示"请先登录"。这个 bug 在测试里表现为偶发的
+        ConnectionAbortedError（五次里挂两次），很难当成"只是测试不稳定"糊过去。
+        """
+        settings = self._settings()
 
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -394,6 +410,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "文件是空的。"}, status=400)
             return
         if length > settings.upload_max_bytes:
+            self._drain_body(length)  # 先读完再拒，否则客户端看到的是连接被中止
             self._send_json(
                 {
                     "error": f"文件太大（{length} 字节，单个文件上限 "
@@ -404,6 +421,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
 
         raw = self.rfile.read(length)
+
+        if not self._auth_ok():
+            return
+        account = getattr(self, "_account", None)
+
+        raw_name = (parse_qs(urlsplit(self.path).query).get("path") or [""])[0]
+        name = safe_upload_name(raw_name)
+        if name is None:
+            self._send_json({"error": "文件名不合法。"}, status=400)
+            return
+
         try:
             raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -457,10 +485,16 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         绑在回环地址上（本地自用）不要求登录，方便直接 curl；
         一旦监听到别处就必须登录——指标里带着请求路径、账号名和
         key 的脱敏指纹，不该对公网敞开。
+
+        容器里必须绑 0.0.0.0，于是"绑回环就免登录"这条走不通，而抓取端
+        又走不了登录流程。所以留一个令牌口子：配了 ``AGENT_METRICS_TOKEN``
+        之后，带对令牌（``Authorization: Bearer xxx`` 或 ``?token=xxx``）就放行。
         """
-        if not is_loopback_host(getattr(self.server, "bind_host", "127.0.0.1")):
-            if not self._auth_ok():
-                return
+        if not self._metrics_allowed():
+            self._send_json(
+                {"error": "请先登录，或者带上正确的 AGENT_METRICS_TOKEN。"}, status=401
+            )
+            return
         body = METRICS.render().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -470,6 +504,23 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
         self._log_access(200)
+
+    def _metrics_allowed(self) -> bool:
+        """这个请求能不能看指标。"""
+        if is_loopback_host(getattr(self.server, "bind_host", "127.0.0.1")):
+            return True
+        token = self._settings().metrics_token
+        supplied = self._supplied_metrics_token()
+        if token and supplied and hmac.compare_digest(str(supplied), str(token)):
+            return True
+        return self._auth_ok()
+
+    def _supplied_metrics_token(self) -> str:
+        """从 Authorization 头或查询串里取令牌。"""
+        header = str(self.headers.get("Authorization") or "")
+        if header.lower().startswith("bearer "):
+            return header[7:].strip()
+        return (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
 
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
@@ -565,6 +616,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "请求体为空。"}, status=400)
             return None
         if length > MAX_BODY_BYTES:
+            self._drain_body(MAX_BODY_BYTES * 16)  # 不然客户端会拿到"连接被中止"
             self._send_json({"error": "请求体过大。"}, status=413)
             return None
         raw = self.rfile.read(length)
@@ -732,6 +784,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/sessions/rename",
             "/api/sessions/delete",
         ):
+            self._drain_body()
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
             return
 

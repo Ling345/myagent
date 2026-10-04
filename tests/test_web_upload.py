@@ -181,6 +181,32 @@ def test_upload_requires_login(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_anonymous_upload_always_gets_a_clean_401(tmp_path, monkeypatch):
+    """回归：服务端曾经"没读 body 就回 401 并关连接"，客户端还在发数据，
+    于是拿到的是 ConnectionAbortedError 而不是 401——浏览器里表现为
+    "网络错误"，前端就没法提示"请先登录"。这个 bug 在测试里是~40% 的偶发，
+    很难当成"只是测试不稳定"糊过去，所以这里连着打十次钉住它。"""
+    accounts = AccountStore(tmp_path / "accounts.db")
+    accounts.create("alice", "password123")
+    monkeypatch.setenv("AGENT_CODE_ROOT", str(tmp_path / "sandbox"))
+    server = create_server(
+        host="127.0.0.1",
+        port=0,
+        llm_mode="mock",
+        quiet=True,
+        session_dir=str(tmp_path / "sessions"),
+        accounts=accounts,
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = _Client(f"http://127.0.0.1:{server.server_port}")
+        for _ in range(10):
+            assert client.upload("x.py", b"X = 1\n" * 200)[0] == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # ---------------------------------------------------------------- 拒绝的输入
 
 
