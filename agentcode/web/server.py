@@ -18,7 +18,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.accounts import Account, AccountStore
@@ -30,6 +30,7 @@ from agentcode.config import (
 )
 from agentcode.core.registry import default_registry
 from agentcode.core.errors import AgentCodeError
+from agentcode.lifecycle import code_root_for
 from agentcode.metrics import HTTP_REQUESTS, HTTP_SECONDS, METRICS, REJECTIONS
 from agentcode.plans import get_plan
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
@@ -114,20 +115,6 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(text).is_loopback
     except ValueError:
         return False
-
-
-def code_root_for(base: str | Path, account_id: str | None) -> Path:
-    """某个账号的代码工作目录。
-
-    会话目录一直按用户隔离，代码目录**曾经是全局共享的**——也就是说 alice 让
-    agent 写进去的文件，bob 换个账号就能读到。所以这里也按账号分一层。
-
-    免登录模式（``account_id`` 为空，本地自用）退回共享目录，行为不变。
-    """
-    root = Path(base).resolve()
-    if not account_id:
-        return root
-    return (root / str(account_id)).resolve()
 
 
 def safe_upload_name(raw: str) -> str | None:
@@ -522,6 +509,68 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return header[7:].strip()
         return (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
 
+    def _serve_export(self) -> None:
+        """把自己的会话与代码目录打包成 zip 下载。
+
+        没有导出能力的话，"删除"就是单向门——用户不敢按。
+        """
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        from agentcode.lifecycle import export_archive
+
+        blob = export_archive(self._settings(), account.id, account_name=account.name)
+        filename = f"agentcode-{account.name}-{time.strftime('%Y%m%d')}.zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(blob)))
+        # 用户名可能是中文，走 RFC 5987
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(blob)
+        self._log_access(200)
+
+    def _purge_code(self) -> None:
+        """清空自己的代码工作目录（含上传的文件）。会话不动。"""
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        from agentcode.lifecycle import purge_code
+
+        removed = purge_code(self._settings(), account.id)
+        self._send_json({"removed": removed})
+
+    def _delete_account(self, payload: dict[str, Any]) -> None:
+        """注销：删账号 + 全部会话 + 全部代码和上传文件。
+
+        要输入自己的用户名才执行——这种事没有"撤销"。
+        """
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        if str(payload.get("confirm") or "").strip() != account.name:
+            self._send_json(
+                {
+                    "error": "请输入你自己的用户名以确认注销（这一步不能撤销）。",
+                    "expected": account.name,
+                },
+                status=400,
+            )
+            return
+
+        from agentcode.lifecycle import delete_account
+
+        deleted = delete_account(self.server.accounts, self._settings(), account)  # type: ignore[attr-defined]
+        # 内存里缓存的会话仓库也一并丢掉
+        with self.server.store_lock:  # type: ignore[attr-defined]
+            self.server.user_stores.pop(account.id, None)  # type: ignore[attr-defined]
+        self._send_json({"deleted": deleted})
+
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
         if not getattr(self.server, "require_auth", True):
@@ -650,6 +699,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
             return
+        # 隐私政策与用户协议必须免登录可读——没登录的人也有权知道你怎么处理他的数据
+        if path in ("/privacy", "/privacy.html"):
+            self._serve_static("privacy.html")
+            return
+        if path in ("/terms", "/terms.html"):
+            self._serve_static("terms.html")
+            return
         if path == "/metrics":
             self._serve_metrics()
             return
@@ -709,6 +765,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "请先登录。"}, status=401)
                 return
             self._send_json(self._billing().my_billing(account))
+            return
+        if path == "/api/export":
+            self._serve_export()
             return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
@@ -778,6 +837,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/logout",
             "/api/run",
             "/api/billing/checkout",
+            "/api/account/purge-code",
+            "/api/account/delete",
             "/api/upload",
             "/api/session/reset",
             "/api/sessions/create",
@@ -850,6 +911,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                     "message": "订单已创建。请按约定方式付款，管理员确认到账后套餐立即生效。",
                 }
             )
+            return
+
+        if path == "/api/account/purge-code":
+            self._purge_code()
+            return
+
+        if path == "/api/account/delete":
+            self._delete_account(payload)
             return
 
         session_store: SessionStore = self._store()
@@ -1124,6 +1193,29 @@ def serve(
     threading.Thread(
         target=run_alert_loop, args=(monitor,), name="agentcode-alerts", daemon=True
     ).start()
+
+    # 数据留存：默认不自动清理（AGENT_RETENTION_DAYS=0），删不删由用户自己决定。
+    # 配了就先扫一遍，然后每天扫一次。
+    if settings_for_limits.retention_days > 0:
+        from agentcode.lifecycle import run_retention_loop, sweep_expired
+
+        swept = sweep_expired(
+            settings_for_limits,
+            [account.id for account in accounts.list()],
+            days=settings_for_limits.retention_days,
+        )
+        print(
+            f"数据留存：自动清理超过 {settings_for_limits.retention_days} 天的会话与代码文件"
+            f"（启动时清掉 {swept['removed']} 个）"
+        )
+        threading.Thread(
+            target=run_retention_loop,
+            args=(accounts, settings_for_limits),
+            name="agentcode-retention",
+            daemon=True,
+        ).start()
+    else:
+        print("数据留存：不自动清理，删不删由用户自己在网页上决定")
 
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")

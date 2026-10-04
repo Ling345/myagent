@@ -976,6 +976,86 @@ button:disabled {
 
 /* ------------------------------------------------------------ 上传文件 */
 
+/* ------------------------------------------------------------ 我的数据 */
+
+.data-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.data-button {
+  width: 100%;
+  padding: 7px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.data-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.data-button.is-danger {
+  border-color: rgba(180, 35, 24, 0.35);
+  color: var(--danger);
+}
+
+.data-button.is-danger:hover {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.data-confirm {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.data-confirm[hidden] {
+  display: none;
+}
+
+.data-confirm input {
+  width: 100%;
+  margin: 6px 0 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.data-confirm-row {
+  display: flex;
+  gap: 6px;
+}
+
+.data-confirm-row .data-button {
+  text-align: center;
+}
+
+.legal-links {
+  margin: 4px 12px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.legal-links a {
+  color: var(--text-muted);
+}
+
+.legal-links a:hover {
+  color: var(--accent);
+}
+
 .upload-row {
   display: flex;
   align-items: center;

@@ -1,0 +1,108 @@
+/* 隐私政策 / 用户协议这类文档页的样式。
+   刻意简单：能读、能打印、别喧宾夺主。 */
+
+:root {
+  --bg: #f7faff;
+  --text: #1f2329;
+  --muted: #5b6472;
+  --accent: #3f5cf0;
+  --border: rgba(31, 35, 41, 0.12);
+  --font-ui: "PingFang SC", "Microsoft YaHei UI", "Source Han Sans SC", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 40px 20px 80px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 36px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+h1 {
+  margin: 0 0 4px;
+  font-size: 24px;
+}
+
+h2 {
+  margin: 32px 0 8px;
+  font-size: 17px;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 14px;
+}
+
+th,
+td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: rgba(63, 92, 240, 0.06);
+}
+
+code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(31, 35, 41, 0.06);
+  font-size: 13px;
+}
+
+.callout {
+  margin: 16px 0;
+  padding: 12px 16px;
+  border-left: 3px solid var(--accent);
+  background: rgba(63, 92, 240, 0.06);
+  border-radius: 0 8px 8px 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+footer {
+  max-width: 760px;
+  margin: 16px auto 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+@media print {
+  body {
+    background: #fff;
+    padding: 0;
+  }
+
+  main {
+    border: 0;
+    padding: 0;
+  }
+}
