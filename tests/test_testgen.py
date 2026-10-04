@@ -224,6 +224,27 @@ def test_generate_falls_back_to_the_newest_test_file(tmp_path):
     assert result.dest.is_file()
 
 
+def test_generate_does_not_pick_up_a_stale_file_from_the_workspace(tmp_path):
+    """工作目录里可能留着上一轮跑出来的 test_calc.py。
+
+    回归：判断"哪个是刚写的"不能用 `st_mtime >= time.time()`——文件时间戳走的是
+    粗粒度时钟，可能比同一瞬间的 time.time() 早几毫秒，刚写好的文件会被判成旧的。
+    这个坑 Windows 上碰不到，一到 Linux 就现形（实测差 6 毫秒）。
+    现在改成跑之前拍快照、跑完比差异。
+    """
+    source = _write(tmp_path / "calc.py")
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    # 上一轮留下的、名字正好是约定的那个
+    (workspace / "test_calc.py").write_text("# 上一轮的老文件\n", encoding="utf-8")
+
+    result = generate_for(
+        source, workspace=workspace, run_agent=_stub_agent(filename="test_calc_fresh.py")
+    )
+    assert result.status == "written"
+    assert "def test_f" in result.dest.read_text(encoding="utf-8")  # 新写的那份
+
+
 def test_generate_records_duration(tmp_path):
     source = _write(tmp_path / "calc.py")
     workspace = tmp_path / "work"
