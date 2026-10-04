@@ -103,3 +103,111 @@ def test_billing_orders_empty_message(tmp_path, monkeypatch, capsys):
     code = main(["billing", "orders"])
     assert code == 0
     assert "还没有订单" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- 成本换算
+
+
+def _with_usage(tmp_path, monkeypatch):
+    """准备一份有真实用量的库，并配上单价。"""
+    store = _prepare(tmp_path, monkeypatch)
+    account = store.create("alice", "password123")
+    store.record_usage(account.id, 10_000, calls=1, prompt_tokens=8_000, completion_tokens=2_000)
+    monkeypatch.setenv("AGENT_PRICE_INPUT_PER_MILLION", "200")
+    monkeypatch.setenv("AGENT_PRICE_OUTPUT_PER_MILLION", "800")
+    return store, account
+
+
+def test_costs_reports_money_when_price_is_configured(tmp_path, monkeypatch, capsys):
+    _with_usage(tmp_path, monkeypatch)
+    code = main(["billing", "costs", "--days", "30"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "输出占比 20.0%（实测）" in out
+    # 8000×200 + 2000×800 = 160万 + 160万 = 320万「分×百万分之一」= 3 分
+    assert "￥0.03" in out
+    assert "套餐毛利" in out
+
+
+def test_costs_uses_the_observed_ratio(tmp_path, monkeypatch, capsys):
+    """有真实数据就不要再拿假设值糊弄人。"""
+    _with_usage(tmp_path, monkeypatch)
+    main(["billing", "costs"])
+    out = capsys.readouterr().out
+    assert "假设值" not in out
+
+
+def test_costs_says_so_when_price_is_missing(tmp_path, monkeypatch, capsys):
+    """没配单价就说清楚怎么配，别让人猜为什么全是 0。"""
+    store = _prepare(tmp_path, monkeypatch)
+    store.create("alice", "password123")
+    monkeypatch.delenv("AGENT_PRICE_INPUT_PER_MILLION", raising=False)
+    monkeypatch.delenv("AGENT_PRICE_OUTPUT_PER_MILLION", raising=False)
+
+    code = main(["billing", "costs"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "没配单价" in out
+    assert "AGENT_PRICE_INPUT_PER_MILLION" in out
+
+
+def test_costs_marks_the_assumption_when_there_is_no_data(tmp_path, monkeypatch, capsys):
+    """还没有拆分数据时必须标明"这是假设"，不能假装是实测。"""
+    store = _prepare(tmp_path, monkeypatch)
+    account = store.create("alice", "password123")
+    store.record_usage(account.id, 1000)  # 老式记法：只有总数
+    monkeypatch.setenv("AGENT_PRICE_INPUT_PER_MILLION", "200")
+    monkeypatch.setenv("AGENT_PRICE_OUTPUT_PER_MILLION", "800")
+
+    main(["billing", "costs"])
+    out = capsys.readouterr().out
+    assert "假设值" in out
+    assert "早期数据" in out
+
+
+def test_costs_output_ratio_can_be_overridden(tmp_path, monkeypatch, capsys):
+    store = _prepare(tmp_path, monkeypatch)
+    store.create("alice", "password123")
+    monkeypatch.setenv("AGENT_PRICE_INPUT_PER_MILLION", "200")
+    monkeypatch.setenv("AGENT_PRICE_OUTPUT_PER_MILLION", "800")
+
+    main(["billing", "costs", "--output-ratio", "0.5"])
+    assert "50.0%" in capsys.readouterr().out
+
+
+def test_costs_json_output(tmp_path, monkeypatch, capsys):
+    import json
+
+    _with_usage(tmp_path, monkeypatch)
+    code = main(["billing", "costs", "--json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["price"]["configured"] is True
+    assert payload["totals"]["total_tokens"] == 10_000
+    assert payload["totals"]["estimated_cost_cents"] == 3
+    assert payload["output_ratio_is_observed"] is True
+    plans = {item["plan"] for item in payload["plans"]}
+    assert plans == {"free", "basic", "pro", "team"}
+
+
+def test_costs_can_filter_by_account(tmp_path, monkeypatch, capsys):
+    import json
+
+    store = _prepare(tmp_path, monkeypatch)
+    alice = store.create("alice", "password123")
+    bob = store.create("bob", "password123")
+    store.record_usage(alice.id, 1_000, prompt_tokens=800, completion_tokens=200)
+    store.record_usage(bob.id, 5_000, prompt_tokens=4_000, completion_tokens=1_000)
+
+    main(["billing", "costs", "--account", "bob", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["name"] for row in payload["accounts"]] == ["bob"]
+    assert payload["totals"]["total_tokens"] == 5_000
+
+
+def test_costs_rejects_an_unknown_account(tmp_path, monkeypatch, capsys):
+    _prepare(tmp_path, monkeypatch)
+    assert main(["billing", "costs", "--account", "nobody"]) == 2
+    assert "没有这个账号" in capsys.readouterr().out

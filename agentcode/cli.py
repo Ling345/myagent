@@ -9,6 +9,7 @@ import secrets
 import shutil
 import sys
 import webbrowser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -164,6 +165,20 @@ def build_parser() -> argparse.ArgumentParser:
     orders_parser.add_argument("--account", default=None, help="只看某个账号")
     orders_parser.add_argument("--limit", type=int, default=20)
     orders_parser.add_argument("--json", action="store_true", help="以 JSON 输出")
+    costs_parser = billing_sub.add_parser(
+        "costs", help="用量换算成钱：本月花了多少、每个套餐还剩多少毛利"
+    )
+    costs_parser.add_argument("--account", default=None, help="只看某个账号")
+    costs_parser.add_argument("--days", type=int, default=30, help="看最近多少天，默认 30")
+    costs_parser.add_argument(
+        "--output-ratio",
+        type=float,
+        default=None,
+        help="假设输出占多少（0~1）；没有真实用量时用来估算，默认 0.2",
+    )
+    costs_parser.add_argument("--json", action="store_true", help="以 JSON 输出")
+    costs_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    costs_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
     grant_parser = billing_sub.add_parser("grant", help="直接开通/续期，不经过订单")
     grant_parser.add_argument("name")
     grant_parser.add_argument("plan")
@@ -184,12 +199,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _use_utf8_stdout() -> None:
-    """在真实终端下切换到 UTF-8，避免 Windows 控制台中文乱码。"""
+    """在真实终端下切换到 UTF-8，避免 Windows 控制台中文乱码。
+
+    另外统一加上 ``errors="replace"``：万一输出里出现当前编码表示不了的字符
+    （Windows 中文版控制台默认是 GBK，像 ✓ 这种符号编不出来），
+    也只是显示成问号，而不是整个命令崩掉。重定向到文件时尤其要这样。
+    """
     stream = sys.stdout
     try:
-        if not stream.isatty():
-            return
-        stream.reconfigure(encoding="utf-8")
+        if stream.isatty():
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        else:
+            stream.reconfigure(errors="replace")
     except (AttributeError, ValueError, OSError):
         return
 
@@ -494,6 +515,9 @@ def _billing_command(args: argparse.Namespace) -> int:
     from agentcode.config import DEFAULT_DB_PATH
     from agentcode.core.errors import AgentCodeError
 
+    if args.billing_command == "costs":
+        return _costs_command(args)
+
     store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
     billing = BillingService(store)
     command = args.billing_command
@@ -541,6 +565,144 @@ def _billing_command(args: argparse.Namespace) -> int:
     return 2
 
 
+def _costs_command(args: argparse.Namespace) -> int:
+    """把用量换算成钱：花销、每账号成本、每个套餐还剩多少毛利。
+
+    这是**运营数据**，只在命令行看——用户不需要看你的成本。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.pricing import observed_output_ratio, plan_margins, price_from_settings
+
+    settings = _load_settings(args)
+    price = price_from_settings(settings)
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+
+    days = max(1, int(args.days))
+    today = datetime.now(timezone.utc).date()
+    start = (today - timedelta(days=days - 1)).isoformat()
+    end = today.isoformat()
+
+    accounts = store.list()
+    if args.account:
+        accounts = [item for item in accounts if item.name == args.account]
+        if not accounts:
+            print(f"错误：没有这个账号：{args.account}")
+            return 2
+
+    rows = []
+    totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "unsplit_tokens": 0}
+    for account in accounts:
+        breakdown = store.usage_breakdown(account.id, start, end)
+        for key in totals:
+            totals[key] += breakdown[key]
+        rows.append({"name": account.name, "plan": account.plan, **breakdown})
+
+    observed = observed_output_ratio(totals["prompt_tokens"], totals["completion_tokens"])
+    assumed = getattr(args, "output_ratio", None)
+    # 有真实数据就用真实的；没有就用一个**标明是假设**的默认值——
+    # 只给最坏情况的话，第一次看的人会以为这功能坏了
+    ratio = observed if observed is not None else (assumed if assumed is not None else 0.2)
+    ratio_is_observed = observed is not None
+    estimated_cost = price.cost_cents(totals["prompt_tokens"], totals["completion_tokens"])
+    if totals["unsplit_tokens"]:
+        # 老数据没有输入/输出拆分，按上面那个比例估——并且如实说是估的
+        prompt = int(totals["unsplit_tokens"] * (1 - ratio))
+        estimated_cost += price.cost_cents(prompt, totals["unsplit_tokens"] - prompt)
+
+    payload = {
+        "window": {"start": start, "end": end, "days": days},
+        "price": {
+            "input_cents_per_million": price.input_cents_per_million,
+            "output_cents_per_million": price.output_cents_per_million,
+            "configured": price.configured,
+        },
+        "totals": {**totals, "estimated_cost_cents": estimated_cost},
+        "observed_output_ratio": observed,
+        "output_ratio_used": ratio,
+        "output_ratio_is_observed": ratio_is_observed,
+        "accounts": rows,
+        "plans": [item.to_dict() for item in plan_margins(price, output_ratio=ratio)],
+    }
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"== 最近 {days} 天（{start} ~ {end}）==")
+    if not price.configured:
+        print("提示：没配单价，只看得到 token、算不出钱。在 .env 里加：")
+        print("  AGENT_PRICE_INPUT_PER_MILLION=输入单价（分/百万 token）")
+        print("  AGENT_PRICE_OUTPUT_PER_MILLION=输出单价（分/百万 token）")
+        print("  例：DeepSeek 输入 ￥2/M、输出 ￥8/M → 填 200 和 800")
+    print(
+        f"输入 {_format_tokens(totals['prompt_tokens'])}，"
+        f"输出 {_format_tokens(totals['completion_tokens'])}，"
+        f"合计 {_format_tokens(totals['total_tokens'])}"
+    )
+    if ratio_is_observed:
+        print(f"输出占比 {ratio:.1%}（实测）；估算成本 {_yuan(estimated_cost)}")
+    else:
+        print(
+            f"输出占比 {ratio:.1%}（假设值——还没有真实的输入/输出数据，"
+            f"可以用 --output-ratio 改）；估算成本 {_yuan(estimated_cost)}"
+        )
+    if totals["unsplit_tokens"]:
+        print(
+            f"注意：其中 {_format_tokens(totals['unsplit_tokens'])} token 是早期数据"
+            "（没有输入/输出拆分），成本是按上面这个比例估的。"
+        )
+
+    if rows:
+        print()
+        print("== 按账号 ==")
+        for row in sorted(rows, key=lambda item: item["total_tokens"], reverse=True):
+            cost = price.cost_cents(row["prompt_tokens"], row["completion_tokens"])
+            print(
+                f"  {row['name']:<14}{row['plan']:<8}"
+                f"{_format_tokens(row['total_tokens']):>8} token{_yuan(cost):>10}"
+            )
+
+    print()
+    print("== 套餐毛利（按「用户天天跑满」算的月成本）==")
+    if not ratio_is_observed:
+        print(f"  「估算」两列用的是假设的输出占比 {ratio:.1%}；「最坏」两列假设全是输出。")
+    print(f"  {'套餐':<6}{'售价':>8}{'月额度':>10}{'估算成本':>10}{'估算毛利':>10}{'最坏成本':>10}{'最坏毛利':>10}")
+    for item in plan_margins(price, output_ratio=ratio):
+        estimated = (
+            f"{_yuan(item.estimated_cost_cents):>10}{_yuan(item.estimated_margin_cents):>10}"
+            if item.estimated_cost_cents is not None
+            else f"{'—':>10}{'—':>10}"
+        )
+        print(
+            f"  {item.title:<6}{_yuan(item.price_cents):>8}"
+            f"{_format_tokens(item.monthly_tokens):>10}{estimated}"
+            f"{_yuan(item.worst_case_cost_cents):>10}{_yuan(item.worst_case_margin_cents):>10}"
+        )
+    return 0
+
+
+def _yuan(cents: int | None) -> str:
+    """分 → ￥ 显示。金额内部一律整数分，只在显示时除。
+
+    用全角「￥」（U+FFE5）而不是半角「¥」（U+00A5）：后者在 Windows 的 GBK
+    控制台下编不出来，把输出重定向到文件时会直接 UnicodeEncodeError 崩掉。
+    """
+    if cents is None:
+        return "—"
+    sign = "-" if cents < 0 else ""
+    return f"{sign}￥{abs(int(cents)) / 100:.2f}"
+
+
+def _format_tokens(value: int | None) -> str:
+    number = int(value or 0)
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.2f}M"
+    if number >= 1000:
+        return f"{number / 1000:.1f}k"
+    return str(number)
+
+
 def _testgen_command(args: argparse.Namespace) -> int:
     """执行 test-gen 子命令：给一批源码文件补 pytest 测试。
 
@@ -581,7 +743,8 @@ def _testgen_command(args: argparse.Namespace) -> int:
         )
         results.append(result)
         if not args.json:
-            icon = {"written": "✓", "skipped": "–", "failed": "✗"}[result.status]
+            # 用 GBK 里有的符号：✓/✗ 在 Windows 控制台重定向时会崩
+            icon = {"written": "√", "skipped": "–", "failed": "×"}[result.status]
             detail = f"（{result.reason}）" if result.reason else ""
             print(f"  {icon} {result.dest}{detail}")
 

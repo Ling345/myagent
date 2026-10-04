@@ -77,6 +77,9 @@ DEFAULT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_UPLOAD_QUOTA_BYTES = 50 * 1024 * 1024
 #: 自动清理：会话与代码文件留多久。0 = 不自动清理（默认，删不删由用户自己决定）
 DEFAULT_RETENTION_DAYS = 0
+#: 模型单价（分 / 百万 token）。默认 0 = 没配，那就算不了钱，只能看 token
+DEFAULT_PRICE_INPUT_PER_MILLION = 0
+DEFAULT_PRICE_OUTPUT_PER_MILLION = 0
 
 
 def mask_secret(value: str | None) -> str:
@@ -175,6 +178,9 @@ class Settings:
     metrics_token: str | None = None
     #: 自动清理：会话与代码文件留多久。0 = 不自动清理
     retention_days: int = DEFAULT_RETENTION_DAYS
+    #: 模型单价（分 / 百万 token）。0 = 未配置
+    price_input_per_million: int = DEFAULT_PRICE_INPUT_PER_MILLION
+    price_output_per_million: int = DEFAULT_PRICE_OUTPUT_PER_MILLION
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -275,6 +281,12 @@ class Settings:
             ),
             metrics_token=pick("AGENT_METRICS_TOKEN"),
             retention_days=_to_int(pick("AGENT_RETENTION_DAYS"), DEFAULT_RETENTION_DAYS),
+            price_input_per_million=_to_int(
+                pick("AGENT_PRICE_INPUT_PER_MILLION"), DEFAULT_PRICE_INPUT_PER_MILLION
+            ),
+            price_output_per_million=_to_int(
+                pick("AGENT_PRICE_OUTPUT_PER_MILLION"), DEFAULT_PRICE_OUTPUT_PER_MILLION
+            ),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -378,6 +390,16 @@ class Settings:
             "AGENT_METRICS_TOKEN": mask_secret(self.metrics_token),
             "AGENT_RETENTION_DAYS": str(self.retention_days) + (
                 "（不自动清理）" if self.retention_days <= 0 else ""
+            ),
+            "AGENT_PRICE_INPUT_PER_MILLION": (
+                f"{self.price_input_per_million} 分/百万 token"
+                if self.price_input_per_million
+                else "（未配置，算不了钱）"
+            ),
+            "AGENT_PRICE_OUTPUT_PER_MILLION": (
+                f"{self.price_output_per_million} 分/百万 token"
+                if self.price_output_per_million
+                else "（未配置，算不了钱）"
             ),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
