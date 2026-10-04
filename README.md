@@ -32,6 +32,9 @@
 >
 > 阶段八进行中：**把测试生成收窄成能放进工作流的场景**（`agentcode test-gen` + GitHub Action）。
 > 详见「批量补测试」一节。
+>
+> 阶段九进行中：**算清楚成本账**（账本分开记输入输出 token + `billing costs` 毛利表）。
+> 详见「算清楚这笔账」一节。
 
 内置四种智能体：
 
@@ -542,6 +545,40 @@ D:\Anaconda\python.exe -m agentcode billing confirm <订单号> --reference "微
 迁移**只增不改**（加列不删列）、逐条事务、可重复执行。升级时自动备份好 `traces/agentcode.db`
 就不会有风险——真失败了它会整体回滚并把版本停在上一条。
 
+### 算清楚这笔账：`agentcode billing costs`
+
+「基础版 ¥29/月，每天 20 万 token」——这单生意是赚是亏？先配单价：
+
+```dotenv
+# .env：分 / 百万 token。例：DeepSeek 输入 ¥2/M、输出 ¥8/M
+AGENT_PRICE_INPUT_PER_MILLION=200
+AGENT_PRICE_OUTPUT_PER_MILLION=800
+```
+
+然后：
+
+```powershell
+D:\Anaconda\python.exe -m agentcode billing costs            # 最近 30 天
+D:\Anaconda\python.exe -m agentcode billing costs --days 7   # 最近 7 天
+D:\Anaconda\python.exe -m agentcode billing costs --json     # 给脚本用
+```
+
+它会给出三样东西：**这个窗口花了多少钱**、**每个账号花了多少**、
+以及**每个套餐在"用户天天跑满"时的成本与毛利**。
+
+毛利用两列给，因为只给一个数会误导：
+
+| 列 | 含义 |
+| --- | --- |
+| 估算 | 按**实测**的输入/输出比例算。还没有拆分数据时会标明是假设值（默认输出占 20%，可用 `--output-ratio` 改） |
+| 最坏 | 假设所有 token 都是输出（最贵的那一侧）——不现实，但那是"最坏能亏到哪"的答案 |
+
+两个实现上的讲究：
+
+- 账本从 v3 起**分开记输入与输出 token**。LLM 的输出单价通常是输入的 2–4 倍，
+  只记总数换算出来的是假账。
+- 早期数据只有总数、拆不出来，计价时会**单独标出来**按比例估，而不是假装它不存在。
+
 三种打开方式，效果一样：
 
 | 方式 | 做法 |
@@ -719,6 +756,8 @@ def add(a: str, b: str) -> str:
 | `AGENT_UPLOAD_QUOTA_BYTES` | 否 | `52428800` | 每个用户代码目录的总量上限（50 MB） |
 | `AGENT_METRICS_TOKEN` | 否 | 无 | 抓指标用的令牌；容器里必须绑 0.0.0.0，靠它免登录抓取 |
 | `AGENT_RETENTION_DAYS` | 否 | `0` | 会话与代码文件留多少天；`0` = 不自动清理 |
+| `AGENT_PRICE_INPUT_PER_MILLION` | 否 | `0` | 模型输入单价（分/百万 token）；0 = 算不了钱 |
+| `AGENT_PRICE_OUTPUT_PER_MILLION` | 否 | `0` | 模型输出单价（分/百万 token）；0 = 算不了钱 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
 
 配置文件（`--config configs/example.json`）可以覆盖上面的数值型字段，
