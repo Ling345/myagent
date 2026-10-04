@@ -127,6 +127,53 @@ def test_metrics_endpoint_works_after_login_when_not_loopback(tmp_path):
         server.server_close()
 
 
+def test_metrics_token_allows_scraping_without_login(tmp_path, monkeypatch):
+    """容器里必须绑 0.0.0.0，抓取端又走不了登录流程——所以留了令牌口子。"""
+    monkeypatch.setenv("AGENT_METRICS_TOKEN", "s3cret-scrape-token")
+    server, accounts, base = _server(tmp_path)
+    accounts.create("alice", "password123")
+    server.bind_host = "0.0.0.0"  # type: ignore[attr-defined]
+    try:
+        anonymous = _Client(base)
+        assert anonymous.get("/metrics")[0] == 401
+
+        request = urllib.request.Request(
+            f"{base}/metrics",
+            headers={"Authorization": "Bearer s3cret-scrape-token"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            assert response.status == 200
+            assert b"agentcode_http_requests_total" in response.read()
+
+        # 查询串里带也行（有些抓取配置只能填 URL）
+        assert _Client(base).get("/metrics?token=s3cret-scrape-token")[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_wrong_metrics_token_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_METRICS_TOKEN", "s3cret-scrape-token")
+    server, accounts, base = _server(tmp_path)
+    accounts.create("alice", "password123")
+    server.bind_host = "0.0.0.0"  # type: ignore[attr-defined]
+    try:
+        assert _Client(base).get("/metrics?token=wrong")[0] == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_loopback_does_not_need_a_token(tmp_path):
+    """本地自用别被令牌挡住。"""
+    server, accounts, base = _server(tmp_path)
+    try:
+        assert _Client(base).get("/metrics")[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # ---------------------------------------------------------------- 采集点
 
 

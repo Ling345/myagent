@@ -169,6 +169,8 @@ class Settings:
     alert_error_rate: float = DEFAULT_ALERT_ERROR_RATE
     upload_max_bytes: int = DEFAULT_UPLOAD_MAX_BYTES
     upload_quota_bytes: int = DEFAULT_UPLOAD_QUOTA_BYTES
+    #: 抓指标用的令牌；设了之后 /metrics 允许带它免登录访问
+    metrics_token: str | None = None
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -267,6 +269,7 @@ class Settings:
             upload_quota_bytes=_to_int(
                 pick("AGENT_UPLOAD_QUOTA_BYTES"), DEFAULT_UPLOAD_QUOTA_BYTES
             ),
+            metrics_token=pick("AGENT_METRICS_TOKEN"),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -367,6 +370,7 @@ class Settings:
             "AGENT_ALERT_ERROR_RATE": str(self.alert_error_rate),
             "AGENT_UPLOAD_MAX_BYTES": str(self.upload_max_bytes),
             "AGENT_UPLOAD_QUOTA_BYTES": str(self.upload_quota_bytes),
+            "AGENT_METRICS_TOKEN": mask_secret(self.metrics_token),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
