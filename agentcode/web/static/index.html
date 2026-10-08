@@ -58,6 +58,7 @@
           <span class="account-quota" id="account-quota"></span>
           <button type="button" id="billing-toggle" class="link">套餐与用量</button>
           <button type="button" id="data-toggle" class="link">我的数据</button>
+          <button type="button" id="token-toggle" class="link">API</button>
           <button type="button" id="logout-button" class="link">退出</button>
         </div>
 
@@ -133,6 +134,31 @@
               </button>
             </div>
           </div>
+        </section>
+
+        <section id="token-panel" class="billing-panel" hidden>
+          <header class="billing-head">
+            <strong>API 令牌</strong>
+            <span class="billing-expiry">给脚本和 CI 用</span>
+            <button type="button" id="token-close" class="icon" aria-label="关闭">✕</button>
+          </header>
+          <p class="billing-usage-text">
+            带着 <code>Authorization: Bearer 令牌</code> 调
+            <code>POST /v1/run</code> 就能跑智能体，
+            <code>GET /v1/me</code> 查额度。字段与示例见 <code>docs/api.md</code>。
+            <strong>明文只显示这一次</strong>，丢了就吊销重建。
+          </p>
+          <div class="notify-row">
+            <input
+              id="token-name"
+              type="text"
+              autocomplete="off"
+              placeholder="给这把令牌起个名字"
+            />
+            <button type="button" id="token-create" class="data-button">新建</button>
+          </div>
+          <div id="token-fresh" class="token-fresh" hidden></div>
+          <div id="token-list" class="token-list"></div>
         </section>
 
         <p class="legal-links">

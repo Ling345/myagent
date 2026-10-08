@@ -750,6 +750,270 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         used, _calls = store.usage_today(account.id)
         self._notifier().quota_exhausted(account, limit=store.daily_limit(account), used=used)
 
+    # ------------------------------------------------------------ API 令牌管理
+
+    def _serve_tokens(self) -> None:
+        """列出自己的 API 令牌（只有前缀，没有明文也没有哈希）。"""
+        if not self._auth_ok():
+            return
+        from agentcode.tokens import ApiTokenService
+
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        self._send_json({"tokens": ApiTokenService(self.server.accounts).list(account.id)})  # type: ignore[attr-defined]
+
+    def _create_token(self, payload: dict[str, Any]) -> None:
+        """新建一把令牌。**明文只在这里返回一次**——之后谁也拿不回来。"""
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.tokens import ApiTokenService
+
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        raw_days = payload.get("expires_days")
+        expires_days = int(raw_days) if isinstance(raw_days, int) and raw_days > 0 else None
+        record, plaintext = ApiTokenService(self.server.accounts).create(  # type: ignore[attr-defined]
+            account, name=str(payload.get("name") or ""), expires_days=expires_days
+        )
+        self._audit(
+            AUDIT.API_TOKEN_CREATE,
+            target=str(record["name"]),
+            detail={"prefix": record["prefix"], "expires_at": record["expires_at"] or ""},
+        )
+        self._send_json(
+            {
+                "token": plaintext,  # 只此一次
+                "record": {key: value for key, value in record.items() if key != "token_hash"},
+                "warning": "令牌只显示这一次，请立刻复制保存；丢了只能吊销后重建。",
+            }
+        )
+
+    def _revoke_token(self, payload: dict[str, Any]) -> None:
+        """吊销一把令牌（只能吊销自己的）。"""
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.tokens import ApiTokenService
+
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        token_id = str(payload.get("id") or "").strip()
+        revoked = ApiTokenService(self.server.accounts).revoke(account.id, token_id)  # type: ignore[attr-defined]
+        self._audit(
+            AUDIT.API_TOKEN_REVOKE,
+            target=token_id,
+            result="ok" if revoked else "not_found",
+        )
+        self._send_json({"revoked": revoked})
+
+    # ------------------------------------------------------------ 对外 API
+
+    def _api_gate(self) -> tuple[Account, dict[str, Any]] | None:
+        """对外接口的公共闸门：开关 + 令牌。
+
+        失败时已经回过响应了，调用方直接 ``return`` 即可。
+        """
+        if not self._settings().api_enabled:
+            self._send_json(
+                {"error": "对外 API 已关闭（AGENT_API_ENABLED=false）。"}, status=404
+            )
+            return None
+
+        from agentcode.tokens import ApiTokenService
+
+        header = str(self.headers.get("Authorization") or "")
+        plaintext = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        resolved = ApiTokenService(self.server.accounts).resolve(plaintext)  # type: ignore[attr-defined]
+        if resolved is None:
+            REJECTIONS.inc(reason="bad_token")
+            self._send_json(
+                {
+                    "error": "令牌无效或已失效。请在网页「我的数据」里生成 API 令牌，"
+                    "然后用请求头 Authorization: Bearer <令牌> 调用。",
+                },
+                status=401,
+            )
+            return None
+        return resolved["account"], resolved["token"]
+
+    def _serve_api_me(self) -> None:
+        """GET /v1/me：查自己的套餐、额度、以及这把令牌是谁。"""
+        gate = self._api_gate()
+        if gate is None:
+            return
+        account, token = gate
+        store: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        plan = store.effective_plan(account)
+        used, calls = store.usage_today(account.id)
+        limit = store.daily_limit(account)
+        unlimited = limit <= 0
+        self._send_json(
+            {
+                "account": account.name,
+                "plan": account.plan,
+                "plan_title": plan.title,
+                "plan_expires_at": account.plan_expires_at or "",
+                "daily_token_limit": limit,
+                "used_today": used,
+                "calls_today": calls,
+                "remaining": -1 if unlimited else max(0, limit - used),
+                "unlimited": unlimited,
+                "limits": {
+                    "per_minute": plan.per_minute,
+                    "max_concurrent": plan.max_concurrent,
+                },
+                "token": {
+                    "name": token["name"],
+                    "prefix": token["prefix"],
+                    "last_used_at": token["last_used_at"],
+                },
+            }
+        )
+
+    def _serve_api_run(self, payload: dict[str, Any]) -> None:
+        """POST /v1/run：给一个任务，同步拿回结果。
+
+        和网页那条路复用同一套东西——agent 装配、中间件、token 预算、限流闸门、
+        用量记账。区别只有两点：认人靠令牌；结果一次性返回而不是流式推送。
+        """
+        from agentcode import audit as AUDIT
+        from agentcode.core.registry import default_registry
+        from agentcode.web.runner import run_stream
+
+        gate = self._api_gate()
+        if gate is None:
+            return
+        account, token = gate
+
+        task = str(payload.get("task") or "").strip()
+        if not task:
+            self._send_json(
+                {"error": '任务不能为空：请求体里要有 {"task": "..."}。'}, status=400
+            )
+            return
+        agent_name = str(payload.get("agent") or "react").strip()
+        if agent_name not in default_registry:
+            self._send_json(
+                {
+                    "error": f"没有这个智能体：{agent_name}。"
+                    f"可用：{'、'.join(default_registry.names())}"
+                },
+                status=400,
+            )
+            return
+
+        raw_steps = payload.get("max_steps")
+        max_steps = int(raw_steps) if isinstance(raw_steps, int) and raw_steps > 0 else None
+        session_id = str(payload.get("session_id") or "").strip() or None
+
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        allowed, reason = accounts.check_quota(account)
+        if not allowed:
+            REJECTIONS.inc(reason="quota")
+            self._notify_quota(account)
+            self._send_json({"error": reason}, status=402)
+            return
+
+        settings = self._settings()
+        plan = accounts.effective_plan(account)
+        settings = scope_settings_for_plan(settings, account.plan)
+        settings = settings.apply_overrides(
+            {"code_root": str(code_root_for(settings.code_root, account.id))}
+        )
+
+        # 限流按**账号**算（不是按 IP）：一把令牌被拿去刷，只影响它自己的额度
+        guard_key = f"api:{account.id}"
+        decision = self.server.guard.acquire(  # type: ignore[attr-defined]
+            guard_key,
+            per_minute=plan.per_minute,
+            max_concurrent=plan.max_concurrent,
+        )
+        if not decision.allowed:
+            self._reject_by_limit(decision)
+            return
+
+        # 后端由服务端决定：调用方不能在请求里挑 mock 去拿假答案
+        llm_mode = str(getattr(self.server, "llm_mode", "mock"))
+        started = time.perf_counter()
+        answer_event: dict[str, Any] | None = None
+        error_message = ""
+        try:
+            for event in run_stream(
+                agent_name,
+                task,
+                llm_mode=llm_mode,
+                max_steps=max_steps,
+                settings=settings,
+                session_store=self.server.store_for(account.id),  # type: ignore[attr-defined]
+                session_id=session_id,
+            ):
+                if event.get("type") == "answer":
+                    answer_event = event
+                elif event.get("type") == "error":
+                    error_message = str((event.get("data") or {}).get("message") or "任务没能完成。")
+        except Exception as exc:  # noqa: BLE001 - 同步接口要把失败如实告诉调用方
+            error_message = f"运行失败：{exc}"
+        finally:
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        data = dict((answer_event or {}).get("data") or {})
+        usage = dict(data.get("usage") or {})
+        total_tokens = int(usage.get("total_tokens") or 0)
+        run_id = uuid.uuid4().hex[:12]
+        # 记账走同一条账本：网页、CLI、API 的用量从同一个地方算钱
+        accounts.record_usage(
+            account.id,
+            total_tokens,
+            calls=1,
+            run_id=run_id,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
+        self._audit(
+            AUDIT.API_RUN,
+            account=account,
+            target=agent_name,
+            result="ok" if not error_message else "error",
+            detail={
+                # 叫 token_name 不叫 token：审计的敏感字段过滤把 "token" 这类键一律
+                # 抹成 ***（那条规则是对的），而且这样写也不会有人顺手把明文塞进来
+                "token_name": token["name"],
+                "agent": agent_name,
+                "tokens": total_tokens,
+                "session_id": session_id or "",
+                "ms": elapsed_ms,
+            },
+        )
+
+        body = {
+            "run_id": run_id,
+            "agent": agent_name,
+            "llm_mode": llm_mode,
+            "session_id": session_id or "",
+            "success": not error_message,
+            "answer": str(data.get("answer") or ""),
+            "artifacts": data.get("artifacts") or [],
+            "usage": {
+                "total_tokens": total_tokens,
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+            },
+            "elapsed_ms": elapsed_ms,
+        }
+        if error_message:
+            body["error"] = error_message
+            self._send_json(body, status=502)
+            return
+        self._send_json(body)
+
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
         if not getattr(self.server, "require_auth", True):
@@ -954,6 +1218,12 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/account/email":
             self._serve_email()
             return
+        if path == "/api/tokens":
+            self._serve_tokens()
+            return
+        if path == "/v1/me":
+            self._serve_api_me()
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
     def _account_payload(self, account: Account) -> dict[str, Any]:
@@ -1035,6 +1305,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/trash/purge",
             "/api/trash/empty",
             "/api/account/email",
+            "/v1/run",
+            "/api/tokens/create",
+            "/api/tokens/revoke",
         ):
             self._drain_body()
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
@@ -1052,6 +1325,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 self._reject_by_limit(decision)
                 return
             self._handle_login(payload)
+            return
+
+        if path == "/v1/run":
+            # 对外接口：认令牌、不认 cookie，所以要在 _auth_ok() 之前处理
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._serve_api_run(payload)
             return
 
         if path == "/api/logout":
@@ -1114,6 +1395,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/account/email":
             self._set_email(payload)
+            return
+
+        if path == "/api/tokens/create":
+            self._create_token(payload)
+            return
+
+        if path == "/api/tokens/revoke":
+            self._revoke_token(payload)
             return
 
         if path == "/api/trash/restore":

@@ -59,6 +59,13 @@ const els = {
   trashEmpty: document.getElementById("trash-empty"),
   notifyEmail: document.getElementById("notify-email"),
   notifySave: document.getElementById("notify-save"),
+  tokenName: document.getElementById("token-name"),
+  tokenCreate: document.getElementById("token-create"),
+  tokenFresh: document.getElementById("token-fresh"),
+  tokenList: document.getElementById("token-list"),
+  tokenToggle: document.getElementById("token-toggle"),
+  tokenPanel: document.getElementById("token-panel"),
+  tokenClose: document.getElementById("token-close"),
   uploadButton: document.getElementById("upload-button"),
   uploadInput: document.getElementById("upload-input"),
   uploadChips: document.getElementById("upload-chips"),
@@ -1048,11 +1055,24 @@ els.billingClose.addEventListener("click", () => {
  */
 function openDataPanel() {
   els.dataPanel.hidden = false;
+  els.tokenPanel.hidden = true;
   els.dataConfirm.hidden = true;
   els.dataConfirmInput.value = "";
   els.dataConfirmName.textContent = (state.account && state.account.name) || "";
   loadTrash();
   loadNotifyEmail();
+}
+
+/**
+ * API 令牌单独一个面板。
+ *
+ * 一开始塞在「我的数据」里，实测面板内容涨到 800 多像素、超出一屏，
+ * 令牌那块被挤到可视区外面（要面板内部滚动才够得到）。拆开之后两边都短。
+ */
+function openTokenPanel() {
+  els.tokenPanel.hidden = false;
+  els.dataPanel.hidden = true;
+  loadTokens();
 }
 
 function exportMyData() {
@@ -1109,6 +1129,110 @@ async function saveNotifyEmail() {
   }
 }
 
+/* ------------------------------------------------------------ API 令牌 */
+
+/**
+ * 令牌管理：新建（明文只显示这一次）、复制、吊销。
+ *
+ * 明文不落盘、不进日志，页面上也只在这一刻出现——所以"复制"要显眼，
+ * 并且把"丢了只能重建"说清楚，不然用户会以为还能再看到。
+ */
+async function loadTokens() {
+  if (!els.tokenList) return;
+  let payload;
+  try {
+    payload = await getJSON("/api/tokens");
+  } catch (error) {
+    els.tokenList.textContent = error.message;
+    return;
+  }
+  els.tokenList.replaceChildren();
+  const tokens = payload.tokens || [];
+  if (!tokens.length) {
+    const empty = document.createElement("p");
+    empty.className = "trash-empty";
+    empty.textContent = "还没有令牌。";
+    els.tokenList.appendChild(empty);
+  } else {
+    for (const item of tokens) {
+      els.tokenList.appendChild(renderToken(item));
+    }
+  }
+  scrollPanelIntoView();
+}
+
+function renderToken(item) {
+  const row = document.createElement("div");
+  row.className = "token-item" + (item.is_active && !item.expired ? "" : " is-off");
+
+  const title = document.createElement("span");
+  title.textContent = item.name;
+  const meta = document.createElement("span");
+  meta.className = "trash-when";
+  const state = !item.is_active ? "已吊销" : item.expired ? "已过期" : "有效";
+  const used = item.last_used_at ? formatTime(item.last_used_at) : "从未";
+  meta.textContent = `${item.prefix}… · ${state} · 最近使用 ${used}`;
+
+  row.append(title, meta);
+  if (item.is_active) {
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "data-button is-danger";
+    revoke.textContent = "吊销";
+    revoke.addEventListener("click", () => revokeToken(item));
+    row.appendChild(revoke);
+  }
+  return row;
+}
+
+async function createToken() {
+  const name = (els.tokenName.value || "").trim();
+  try {
+    const payload = await postJSON("/api/tokens/create", { name });
+    els.tokenName.value = "";
+    showFreshToken(payload.token);
+    els.runStatus.textContent = "令牌已创建，请立刻复制保存（只显示这一次）。";
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+    return;
+  }
+  loadTokens();
+}
+
+function showFreshToken(plaintext) {
+  els.tokenFresh.replaceChildren();
+  els.tokenFresh.hidden = false;
+
+  const code = document.createElement("code");
+  code.textContent = plaintext;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "data-button";
+  copy.textContent = "复制";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(plaintext);
+      els.runStatus.textContent = "已复制到剪贴板。";
+    } catch (_error) {
+      // 剪贴板权限被拒（或非 HTTPS）时退化成手动选中——总比什么都不说好
+      els.runStatus.textContent = "复制失败，请手动选中上面那串令牌。";
+    }
+  });
+  els.tokenFresh.append(code, copy);
+}
+
+async function revokeToken(item) {
+  if (!window.confirm(`吊销令牌「${item.name}」？用它调用的脚本会立刻失效。`)) return;
+  try {
+    await postJSON("/api/tokens/revoke", { id: item.id });
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+    return;
+  }
+  els.runStatus.textContent = "已吊销。";
+  loadTokens();
+}
+
 
 /**
  * 回收站：删错的东西在这里，能恢复，也能彻底删掉。
@@ -1151,8 +1275,10 @@ async function loadTrash() {
  * 的父级侧栏——滚到最底，下沿自然贴住视口底部。
  */
 function scrollPanelIntoView() {
-  if (els.dataPanel.hidden) return;
-  const sidebar = els.dataPanel.closest(".sidebar");
+  // 现在有两个面板（我的数据 / API 令牌），滚当前打开的那一个
+  const panel = [els.dataPanel, els.tokenPanel].find((item) => item && !item.hidden);
+  if (!panel) return;
+  const sidebar = panel.closest(".sidebar");
   if (sidebar) sidebar.scrollTop = sidebar.scrollHeight;
 }
 
@@ -1250,6 +1376,11 @@ els.dataExport.addEventListener("click", exportMyData);
 els.dataPurge.addEventListener("click", purgeMyCode);
 els.trashEmpty.addEventListener("click", emptyMyTrash);
 els.notifySave.addEventListener("click", saveNotifyEmail);
+els.tokenCreate.addEventListener("click", createToken);
+els.tokenToggle.addEventListener("click", openTokenPanel);
+els.tokenClose.addEventListener("click", () => {
+  els.tokenPanel.hidden = true;
+});
 els.dataDelete.addEventListener("click", () => {
   els.dataConfirm.hidden = false;
   els.dataConfirmInput.focus();
