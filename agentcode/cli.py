@@ -8,6 +8,7 @@ import os
 import secrets
 import shutil
 import sys
+import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -168,6 +169,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("name")
     plan_parser.add_argument("plan", help="free / basic / pro / team / owner")
     plan_parser.add_argument("--months", type=int, default=1, help="有效月数，默认 1")
+    email_parser = user_sub.add_parser("email", help="设置/查看接收通知的邮箱")
+    email_parser.add_argument("name", help="账号名")
+    email_parser.add_argument("--set", dest="address", default=None, help="新邮箱；给空串即清空")
+    email_parser.add_argument("--clear", action="store_true", help="清空邮箱（不再接收通知）")
 
     billing_parser = subparsers.add_parser("billing", help="订单与开通（收费相关）")
     billing_sub = billing_parser.add_subparsers(dest="billing_command", required=True)
@@ -242,6 +247,18 @@ def build_parser() -> argparse.ArgumentParser:
     audit_prune.add_argument("--days", type=int, default=None, help="默认用 AGENT_AUDIT_DAYS")
     audit_prune.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     audit_prune.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+    notify_parser = subparsers.add_parser("notify", help="服务通知：发出去没有、发到哪")
+    notify_sub = notify_parser.add_subparsers(dest="notify_command", required=True)
+    notify_list = notify_sub.add_parser("list", help="看通知台账（发成功/排队/失败）")
+    notify_list.add_argument("--limit", type=int, default=20, help="看多少条，默认 20")
+    notify_list.add_argument("--account", default=None, help="只看某个账号")
+    notify_list.add_argument("--status", default=None, help="只看某种状态：sent/queued/failed/skipped")
+    notify_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    _add_data_path_arguments(notify_list)
+    notify_test = notify_sub.add_parser("test", help="给某个账号真发一封测试通知")
+    notify_test.add_argument("account", help="账号名")
+    _add_data_path_arguments(notify_test)
 
     trash_parser = subparsers.add_parser("trash", help="回收站：误删的东西在这里")
     trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
@@ -534,6 +551,68 @@ def _trash_command(args: argparse.Namespace) -> int:
         return 1
 
 
+def _notify_command(args: argparse.Namespace) -> int:
+    """通知台账与测试发送。
+
+    没配渠道时通知只会记进台账（``queued``），所以这个命令的第二个用途是
+    **自查**："我以为配好了，其实一封都没发出去"要能一眼看出来。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.notify import Notifier
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    settings = _load_settings(args)
+
+    if args.notify_command == "test":
+        account = store.get(args.account)
+        if account is None:
+            print(f"错误：没有这个账号：{args.account}")
+            return 2
+        notifier = Notifier(store, settings)
+        if not account.email:
+            print(f"{account.name} 还没填邮箱，先补一个：agentcode user email {account.name} --set a@b.com")
+            return 1
+        print(f"通知渠道：{notifier.channel_name()}")
+        result = notifier.notify(
+            "notify.test",
+            account=account,
+            subject="AgentCode 测试通知",
+            body=f"这是发给 {account.name} 的一条测试通知。收到说明渠道配对了。",
+            dedupe_key=f"test-{time.time():.0f}",
+        )
+        if result["delivered"]:
+            print(f"已发出（{result['channel']}）→ {account.email}")
+            return 0
+        print(f"没发出去：{result.get('reason') or result.get('error') or result['status']}")
+        return 1
+
+    account_id = None
+    if args.account:
+        target = store.get(args.account)
+        if target is None:
+            print(f"错误：没有这个账号：{args.account}")
+            return 2
+        account_id = target.id
+    rows = store.notifications(limit=args.limit, account_id=account_id, status=args.status)
+    if args.json:
+        print(json.dumps({"notifications": rows}, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("（通知台账是空的）")
+        return 0
+    print(f"最近 {len(rows)} 条：")
+    for item in rows:
+        who = item["account_name"] or "-"
+        mark = {"sent": "已发", "queued": "未发（没配渠道）", "failed": "失败", "skipped": "跳过"}.get(
+            str(item["status"]), str(item["status"])
+        )
+        note = f"：{item['error']}" if item["error"] else ""
+        print(f"  {item['at']}  {who:<10} {item['event']:<26} {mark}{note}")
+    print("  提示：agentcode notify test <账号> 可以真发一封试试渠道通不通。")
+    return 0
+
+
 def _run_command(args: argparse.Namespace) -> int:
     """执行 run 子命令。"""
     settings = _load_settings(args)
@@ -618,6 +697,7 @@ def _user_command(args: argparse.Namespace) -> int:
     from agentcode import audit as AUDIT
     from agentcode.audit import AuditLog
     from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.core.errors import AgentCodeError
 
     store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
     log = AuditLog(store)
@@ -693,6 +773,29 @@ def _user_command(args: argparse.Namespace) -> int:
         print("已更新密码。" if changed else f"账号「{args.name}」不存在。")
         if changed and not args.password:
             print(f"新密码：{password}（只显示这一次）")
+        return 0 if changed else 1
+
+    if command == "email":
+        account = store.get(args.name)
+        if account is None:
+            print(f"账号「{args.name}」不存在。")
+            return 1
+        if args.address is None and not args.clear:
+            print(f"{account.name} 的接收邮箱：{account.email or '（没填，不接收通知）'}")
+            return 0
+        try:
+            changed = store.set_email(account.name, "" if args.clear else args.address)
+        except AgentCodeError as exc:
+            print(f"错误：{exc}")
+            return 2
+        log.record(
+            AUDIT.ACCOUNT_EMAIL,
+            actor_name=OPERATOR,
+            target=account.name,
+            result="ok" if changed else "not_found",
+            detail={"email": store.get(account.name).email or ""},
+        )
+        print(f"已更新：{store.get(account.name).email or '（清空，不再接收通知）'}")
         return 0 if changed else 1
 
     if command == "plan":
@@ -1298,6 +1401,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "trash":
             return _trash_command(args)
+
+        if args.command == "notify":
+            return _notify_command(args)
 
         if args.command == "test-gen":
             return _testgen_command(args)
