@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import tarfile
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -52,6 +53,10 @@ CODE_DIR = "sandbox"
 ALLOWED_TOP_LEVEL = frozenset({MANIFEST_NAME, DB_NAME, SESSIONS_DIR, CODE_DIR})
 #: 清单里参与"和实际内容对账"的字段
 CHECKED_FIELDS = ("accounts", "ledger_rows", "session_files", "code_files", "schema_version")
+#: 自动备份的文件名前缀——清理老备份时只认这种名字，别的一律不碰
+AUTO_PREFIX = "agentcode-"
+#: 后台多久检查一次该不该备份
+DEFAULT_CHECK_INTERVAL_SECONDS = 3600.0
 
 
 class BackupError(RuntimeError):
@@ -227,6 +232,125 @@ def _write_archive(work_dir: Path, destination: Path) -> None:
     except BaseException:
         destination.unlink(missing_ok=True)
         raise
+
+
+# ---------------------------------------------------------------------- 自动备份
+
+
+def auto_backup(settings: Settings, *, now: float | None = None) -> BackupManifest | None:
+    """启动时/定时自动备一份；不需要备就返回 ``None``。
+
+    三步判断，顺序不能反：
+
+    1. 没配 ``backup_dir``（默认）→ **什么都不做**。往用户磁盘上写文件这件事
+       得由用户明确要求，不能"为你好"就开；
+    2. 目录里已经有一份"能读得出来"的、而且还没到间隔 → 跳过。读不出来（坏包、
+       传了一半的文件）不算数——那种包在真出事的时候救不了你，不该挡住新的一份；
+    3. 该备就备一份，然后只留最近 ``backup_keep`` 份。
+    """
+    directory = str(getattr(settings, "backup_dir", "") or "").strip()
+    if not directory:
+        return None
+
+    folder = Path(directory)
+    interval_hours = float(getattr(settings, "backup_interval_hours", 24.0) or 0)
+    keep = int(getattr(settings, "backup_keep", 7) or 0)
+    moment = now if now is not None else time.time()
+
+    last = _last_readable_backup_time(folder)
+    if last is not None and interval_hours > 0 and moment - last < interval_hours * 3600:
+        return None
+
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = create_backup(settings, _free_path(folder, moment))
+    prune_backups(folder, keep=keep, protect={Path(manifest.path)})
+    return manifest
+
+
+def _free_path(directory: Path, moment: float) -> Path:
+    """在目录里挑一个还没被占用的名字。
+
+    文件名精确到秒，同一秒里连着备两份会撞名；而 :func:`create_backup` 又拒绝
+    覆盖已有文件（那条规则不能为了这里松掉），所以这里加个序号。
+    """
+    stamp = datetime.fromtimestamp(moment, tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    candidate = directory / f"{AUTO_PREFIX}{stamp}.tar.gz"
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = directory / f"{AUTO_PREFIX}{stamp}-{suffix}.tar.gz"
+    return candidate
+
+
+def _last_readable_backup_time(directory: Path) -> float | None:
+    """目录里最近一份**读得出来**的备份有多新；一份都没有就返回 ``None``。"""
+    if not directory.is_dir():
+        return None
+    latest: float | None = None
+    for path in sorted(directory.glob(f"{AUTO_PREFIX}*.tar.gz")):
+        try:
+            read_manifest(path)
+            stamp = path.stat().st_mtime
+        except (BackupError, OSError):
+            continue
+        if latest is None or stamp > latest:
+            latest = stamp
+    return latest
+
+
+def prune_backups(directory: str | Path, *, keep: int, protect: set[Path] | None = None) -> list[Path]:
+    """只留最近的 ``keep`` 份自动备份，返回删掉的那些。
+
+    三条护栏，别拆：
+
+    * 只认 ``agentcode-*.tar.gz`` 这种名字——你手工放进来的包、别的文件，一律不碰；
+    * ``keep <= 0`` 表示**不删**（宁可占地方，也不要因为配置手滑把备份清空）；
+    * 刚备好的那一份永远不删。
+    """
+    folder = Path(directory)
+    if keep <= 0 or not folder.is_dir():
+        return []
+
+    safe = {Path(item) for item in (protect or set())}
+    candidates = [
+        item
+        for item in folder.glob(f"{AUTO_PREFIX}*.tar.gz")
+        if item.is_file() and item not in safe
+    ]
+    candidates.sort(key=lambda item: (item.stat().st_mtime, item.name), reverse=True)
+    # 受保护的那几份也占名额（刚备好的那份当然要算在"留几份"里）
+    room = max(0, keep - len(safe))
+    removed: list[Path] = []
+    for stale in candidates[room:]:
+        # 删的是自动备份里的老家伙；删不掉（被占用、没权限）不算错
+        try:
+            stale.unlink()
+        except OSError:
+            continue
+        removed.append(stale)
+    return removed
+
+
+def run_backup_loop(
+    settings: Settings, *, check_interval_seconds: float = DEFAULT_CHECK_INTERVAL_SECONDS
+) -> None:
+    """后台循环：定期检查该不该备份，该备就备。
+
+    **先查再睡**：启动那一刻正是"今天还没有备份"的时候，要先看一眼。
+    循环里的任何失败都只打印、不抛出——备份是后台的看门活儿，
+    不能因为它把整个服务带下去。
+    """
+    while True:
+        try:
+            manifest = auto_backup(settings)
+            if manifest is not None:
+                print(
+                    f"自动备份：{manifest.path}"
+                    f"（账号 {manifest.accounts} 个，会话 {manifest.session_files} 个文件）"
+                )
+        except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务带下去
+            print(f"自动备份失败（服务继续跑）：{exc}")
+        time.sleep(max(60.0, check_interval_seconds))
 
 
 # ---------------------------------------------------------------------- 校验（演练）

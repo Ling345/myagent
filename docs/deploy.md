@@ -47,6 +47,9 @@ AGENT_ALERT_WEBHOOK=
 
 # 可选：抓指标用的令牌（见第 5 节）
 AGENT_METRICS_TOKEN=
+
+# 可选：自动备份目录（见第 6 节）。留空 = 不自动备份
+AGENT_BACKUP_DIR=/data/backups
 ```
 
 ## 3. 起服务
@@ -137,11 +140,46 @@ scrape_configs:
 | `sandbox/` | 每个账号的代码工作目录（上传的文件、agent 生成的文件都在这） |
 | `traces/` | 运行轨迹 |
 
-**备份就是备份这个目录**：
+**别用 `tar` 直接打包这个目录**。数据库正在写入时，磁盘上的 `.db` 可能是"事务做了一半"
+的状态，这样打出来的包平时看不出问题，真要恢复的那天才发现打不开。用内置命令：
 
 ```bash
-tar czf agentcode-backup-$(date +%F).tar.gz -C /srv/agentcode/data .
+# 备份（容器里跑，路径与容器内一致）
+docker compose exec app python -m agentcode backup create
+
+# 手上有哪些包、里面各是什么
+docker compose exec app python -m agentcode backup list
+
+# 恢复演练：把包解开、真的把库打开读一遍（账号 + 完整性检查 + schema 版本）
+docker compose exec app python -m agentcode backup verify /data/backups/agentcode-20261008-120000.tar.gz
 ```
+
+包里有四样东西：`manifest.json`（清单）、`agentcode.db`（一致性快照）、
+`web-sessions/`（会话）、`sandbox/`（代码工作区）。
+
+**恢复是往一个目录里解，不是原地覆盖**：
+
+```bash
+python -m agentcode backup restore /data/backups/xxx.tar.gz --to /tmp/restore-check
+```
+
+目标目录非空会被拒绝；确实要就地覆盖就加 `--force`，旧数据会**改名留一份**（不删）。
+换回现役数据之前**先停服务**——两个进程同时写同一个库，后果自负。
+
+**多久演练一次**：每次发版前一次，之后每月一次——真的恢复到临时目录，再跑一次
+`python -m agentcode user list` 确认账号读得出来。备份的失败方式是静默的：
+它平时完全不报错，只在你要用它的时候才暴露，所以没演练过的备份等于没有备份。
+
+想让它自动备，就在 `deploy/.env` 里配：
+
+```dotenv
+AGENT_BACKUP_DIR=/data/backups          # 留空 = 不自动备份（默认）
+AGENT_BACKUP_INTERVAL_HOURS=24
+AGENT_BACKUP_KEEP=7                     # 只留最近 7 份，且只删自己生成的那种文件名
+```
+
+服务启动时会在后台查一次、之后每小时查一次，**距上一份超过间隔才备**；
+读不出来的坏包不算"已经备过"，不会挡住新的一份。
 
 数据库是有版本化的迁移机制的，升级时会自动升到最新版本（只增不改、逐条事务、
 可重复执行）。但**迁移是单向的**——回滚代码不会回滚表结构，所以升级前先备份。
@@ -150,7 +188,7 @@ tar czf agentcode-backup-$(date +%F).tar.gz -C /srv/agentcode/data .
 
 ```bash
 # 升级
-tar czf backup.tar.gz -C $AGENTCODE_DATA .   # 先备份
+docker compose exec app python -m agentcode backup create   # 先备份（别偷懒用 tar）
 git pull
 docker compose build
 docker compose up -d

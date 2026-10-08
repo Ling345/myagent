@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -16,9 +18,11 @@ import pytest
 from agentcode.accounts import AccountStore
 from agentcode.backup import (
     BackupError,
+    auto_backup,
     create_backup,
     read_manifest,
     restore_backup,
+    run_backup_loop,
     verify_backup,
 )
 from agentcode.config import Settings
@@ -235,3 +239,138 @@ def test_restore_with_force_moves_the_old_data_aside(tmp_path):
     assert Path(report["moved_aside"]).is_dir()
     assert (Path(report["moved_aside"]) / "旧文件.txt").read_text(encoding="utf-8") == "旧数据"
     assert (target / "agentcode.db").is_file()
+
+
+# ---------------------------------------------------------------- 启动时自动备份
+
+
+def _settings_with_backup(tmp_path: Path, *, hours: float = 24.0, keep: int = 7) -> Settings:
+    """开了自动备份的配置。"""
+    settings = _settings(tmp_path)
+    settings.backup_dir = str(tmp_path / "backups")
+    settings.backup_interval_hours = hours
+    settings.backup_keep = keep
+    return settings
+
+
+def _age(path: Path, hours: float) -> None:
+    """把文件改成 ``hours`` 小时以前（用来假装"上次备份是很久之前"）。"""
+    stamp = time.time() - hours * 3600
+    os.utime(path, (stamp, stamp))
+
+
+def test_auto_backup_is_off_by_default(tmp_path):
+    """不配 AGENT_BACKUP_DIR 就不自动备份：往磁盘上写东西得由用户说了算。"""
+    settings = _settings(tmp_path)
+    _seed(settings)
+    assert auto_backup(settings) is None
+    assert not (tmp_path / "backups").exists()
+
+
+def test_auto_backup_creates_one_then_skips_until_the_interval_passes(tmp_path):
+    settings = _settings_with_backup(tmp_path)
+    _seed(settings)
+
+    first = auto_backup(settings)
+    assert first is not None
+    assert Path(first.path).is_file()
+
+    # 刚备过，不该再备第二份
+    assert auto_backup(settings) is None
+
+    # 上一份已经是 30 小时前的了（间隔 24 小时），该再备一份
+    _age(Path(first.path), hours=30)
+    second = auto_backup(settings)
+    assert second is not None
+    assert len(list(Path(settings.backup_dir).glob("agentcode-*.tar.gz"))) == 2
+
+
+def test_auto_backup_treats_an_unreadable_package_as_no_backup(tmp_path):
+    """目录里躺着一个坏包不能算"已经备过了"——那种包救不了你。"""
+    settings = _settings_with_backup(tmp_path)
+    _seed(settings)
+    directory = Path(settings.backup_dir)
+    directory.mkdir(parents=True)
+    (directory / "agentcode-坏掉的.tar.gz").write_text("这不是包", encoding="utf-8")
+
+    manifest = auto_backup(settings)
+    assert manifest is not None
+    assert Path(manifest.path).is_file()
+
+
+def test_auto_backup_keeps_only_the_newest_packages(tmp_path):
+    """备份目录不能无限长大：只留最近的几份，而且只删自己生成的那种名字。"""
+    settings = _settings_with_backup(tmp_path, keep=2)
+    _seed(settings)
+
+    made: list[Path] = []
+    for _ in range(3):
+        manifest = auto_backup(settings)
+        assert manifest is not None
+        _age(Path(manifest.path), hours=30)  # 让下一轮认为"该再备一份"
+        made.append(Path(manifest.path))
+
+    remaining = sorted(item.name for item in Path(settings.backup_dir).glob("agentcode-*.tar.gz"))
+    assert len(remaining) == 2
+    assert made[0].name not in remaining  # 最老的那份被清掉了
+
+
+def test_auto_backup_never_touches_foreign_files(tmp_path):
+    settings = _settings_with_backup(tmp_path, keep=1)
+    _seed(settings)
+    directory = Path(settings.backup_dir)
+    directory.mkdir(parents=True)
+    (directory / "手工放的.tar.gz").write_text("别人的包", encoding="utf-8")
+    (directory / "重要.txt").write_text("别删我", encoding="utf-8")
+
+    manifest = auto_backup(settings)
+    assert manifest is not None
+    _age(Path(manifest.path), hours=30)
+    assert auto_backup(settings) is not None
+
+    assert (directory / "手工放的.tar.gz").read_text(encoding="utf-8") == "别人的包"
+    assert (directory / "重要.txt").read_text(encoding="utf-8") == "别删我"
+
+
+def test_run_backup_loop_checks_once_then_sleeps(tmp_path, monkeypatch, capsys):
+    from agentcode import backup as backup_module
+
+    settings = _settings_with_backup(tmp_path)
+    _seed(settings)
+    calls: list[object] = []
+    real = backup_module.auto_backup
+    monkeypatch.setattr(backup_module, "auto_backup", lambda item: calls.append(item) or real(item))
+
+    class _Stop(Exception):
+        """把循环从 sleep 里拽出来。"""
+
+    monkeypatch.setattr(backup_module.time, "sleep", lambda _seconds: _raise(_Stop))
+    with pytest.raises(_Stop):
+        run_backup_loop(settings)
+
+    assert len(calls) == 1
+    assert "自动备份" in capsys.readouterr().out
+
+
+def test_run_backup_loop_keeps_going_when_a_backup_fails(tmp_path, monkeypatch, capsys):
+    """备份失败不能让服务挂掉——它是后台的看门活儿，不是主流程。"""
+    from agentcode import backup as backup_module
+
+    settings = _settings_with_backup(tmp_path)
+
+    class _Stop(Exception):
+        """把循环从 sleep 里拽出来。"""
+
+    def _boom(_settings):
+        raise RuntimeError("磁盘满了")
+
+    monkeypatch.setattr(backup_module, "auto_backup", _boom)
+    monkeypatch.setattr(backup_module.time, "sleep", lambda _seconds: _raise(_Stop))
+    with pytest.raises(_Stop):
+        run_backup_loop(settings)
+
+    assert "磁盘满了" in capsys.readouterr().out
+
+
+def _raise(error: type[BaseException]) -> None:
+    raise error

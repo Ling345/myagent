@@ -1220,6 +1220,26 @@ def serve(
     else:
         print("数据留存：不自动清理，删不删由用户自己在网页上决定")
 
+    # 自动备份：默认关闭（AGENT_BACKUP_DIR 不配就不备）。配了就先在后台查一次
+    # ——"今天还没有备份"恰恰是启动这一刻的状态——之后每小时看一次。
+    # 放后台线程：备份要读全量数据，不能拖慢服务起来。
+    if settings_for_limits.backup_dir:
+        from agentcode.backup import run_backup_loop
+
+        threading.Thread(
+            target=run_backup_loop,
+            args=(settings_for_limits,),
+            name="agentcode-backup",
+            daemon=True,
+        ).start()
+        print(
+            f"自动备份：已开启（目录 {settings_for_limits.backup_dir}，"
+            f"间隔 {settings_for_limits.backup_interval_hours:g} 小时，"
+            f"保留 {settings_for_limits.backup_keep} 份）"
+        )
+    else:
+        print("自动备份：未开启（要定时备份就配 AGENT_BACKUP_DIR）")
+
     url = f"http://{host}:{server.server_port}"
     print(f"AgentCode 网页已启动：{url}")
     print(f"默认模型模式：{llm_mode}（页面上不显示模式，一切走这个设置）")

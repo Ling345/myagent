@@ -80,6 +80,10 @@ DEFAULT_RETENTION_DAYS = 0
 #: 模型单价（分 / 百万 token）。默认 0 = 没配，那就算不了钱，只能看 token
 DEFAULT_PRICE_INPUT_PER_MILLION = 0
 DEFAULT_PRICE_OUTPUT_PER_MILLION = 0
+#: 自动备份：目录留空 = 不自动备份（默认）；间隔多久备一次、留几份
+DEFAULT_BACKUP_DIR = ""
+DEFAULT_BACKUP_INTERVAL_HOURS = 24.0
+DEFAULT_BACKUP_KEEP = 7
 
 
 def mask_secret(value: str | None) -> str:
@@ -181,6 +185,12 @@ class Settings:
     #: 模型单价（分 / 百万 token）。0 = 未配置
     price_input_per_million: int = DEFAULT_PRICE_INPUT_PER_MILLION
     price_output_per_million: int = DEFAULT_PRICE_OUTPUT_PER_MILLION
+    #: 自动备份目录；留空 = 不自动备份（往用户磁盘写东西得由用户说了算）
+    backup_dir: str = DEFAULT_BACKUP_DIR
+    #: 距上一份超过多少小时才再备一份
+    backup_interval_hours: float = DEFAULT_BACKUP_INTERVAL_HOURS
+    #: 自动备份保留几份（只删自己生成的那种名字）
+    backup_keep: int = DEFAULT_BACKUP_KEEP
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -287,6 +297,11 @@ class Settings:
             price_output_per_million=_to_int(
                 pick("AGENT_PRICE_OUTPUT_PER_MILLION"), DEFAULT_PRICE_OUTPUT_PER_MILLION
             ),
+            backup_dir=str(pick("AGENT_BACKUP_DIR", DEFAULT_BACKUP_DIR) or ""),
+            backup_interval_hours=_to_float(
+                pick("AGENT_BACKUP_INTERVAL_HOURS"), DEFAULT_BACKUP_INTERVAL_HOURS
+            ),
+            backup_keep=_to_int(pick("AGENT_BACKUP_KEEP"), DEFAULT_BACKUP_KEEP),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -353,6 +368,13 @@ class Settings:
             raise ConfigError(
                 f"AGENT_EXECUTION_BACKEND 只支持 local 或 docker，当前是：{self.execution_backend}。"
             )
+        # 自动备份只在配了目录时才有意义；配了就要求其余参数能真正生效，
+        # 否则会出现"以为在备份，其实一次都没备"——那比不备份更危险
+        if self.backup_dir:
+            if self.backup_interval_hours <= 0:
+                raise ConfigError("AGENT_BACKUP_INTERVAL_HOURS 必须大于 0，否则永远等不到下一次备份。")
+            if self.backup_keep < 1:
+                raise ConfigError("AGENT_BACKUP_KEEP 至少为 1，否则备份刚做好就会被清掉。")
         return self
 
     def max_steps_for(self, agent_name: str) -> int:
@@ -401,6 +423,9 @@ class Settings:
                 if self.price_output_per_million
                 else "（未配置，算不了钱）"
             ),
+            "AGENT_BACKUP_DIR": self.backup_dir or "（不自动备份）",
+            "AGENT_BACKUP_INTERVAL_HOURS": str(self.backup_interval_hours),
+            "AGENT_BACKUP_KEEP": str(self.backup_keep),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
