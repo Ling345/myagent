@@ -187,6 +187,37 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_parser.add_argument("order_id")
     confirm_parser.add_argument("--reference", default=None, help="支付流水备注")
 
+    backup_parser = subparsers.add_parser(
+        "backup", help="备份与恢复（数据要有第二份，而且演练过）"
+    )
+    backup_sub = backup_parser.add_subparsers(dest="backup_command", required=True)
+
+    backup_create = backup_sub.add_parser("create", help="把整份安装打成一个 .tar.gz")
+    backup_create.add_argument("--out", default=None, help="备份文件路径")
+    backup_create.add_argument(
+        "--dir", default=None, help="备份放哪个目录（没给 --out 时用），默认 backups"
+    )
+    backup_create.add_argument("--json", action="store_true", help="以 JSON 输出")
+    backup_create.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    backup_create.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+    backup_verify = backup_sub.add_parser(
+        "verify", help="恢复演练：解开包、真的把库打开读一遍"
+    )
+    backup_verify.add_argument("archive", help="备份文件路径")
+    backup_verify.add_argument("--json", action="store_true", help="以 JSON 输出")
+
+    backup_restore = backup_sub.add_parser("restore", help="把备份解到一个目录")
+    backup_restore.add_argument("archive", help="备份文件路径")
+    backup_restore.add_argument("--to", required=True, help="恢复到哪个目录")
+    backup_restore.add_argument(
+        "--force", action="store_true", help="目标非空也恢复：旧数据改名留一份，不删除"
+    )
+    backup_restore.add_argument("--yes", action="store_true", help="跳过二次确认（脚本里用）")
+
+    backup_list = backup_sub.add_parser("list", help="列出某个目录里的备份")
+    backup_list.add_argument("--dir", default=None, help="备份目录，默认 backups")
+
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与工具")
     list_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     list_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
@@ -565,6 +596,154 @@ def _billing_command(args: argparse.Namespace) -> int:
     return 2
 
 
+# ---------------------------------------------------------------------- backup
+
+
+def _backup_command(args: argparse.Namespace) -> int:
+    """执行 backup 子命令：备份、演练、恢复、列清单。
+
+    ``verify`` / ``restore`` / ``list`` **不读配置**：.env 缺了、库坏了的时候，
+    恰恰是你最需要它们的时候，不能因为读不到模型配置就一起用不了。
+    """
+    from agentcode.backup import BackupError
+
+    handlers = {
+        "create": _backup_create,
+        "verify": _backup_verify,
+        "restore": _backup_restore,
+        "list": _backup_list,
+    }
+    handler = handlers.get(args.backup_command)
+    if handler is None:
+        print("错误：未知的 backup 子命令。")
+        return 2
+    try:
+        return handler(args)
+    except BackupError as exc:
+        print(f"错误：{exc}")
+        return 1
+
+
+def _backup_create(args: argparse.Namespace) -> int:
+    """备一份。默认落到 ``backups/agentcode-<时间>.tar.gz``。"""
+    from agentcode.backup import create_backup
+
+    settings = _load_settings(args)
+    if args.out:
+        target = Path(args.out)
+    else:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = Path(args.dir or "backups") / f"agentcode-{stamp}.tar.gz"
+
+    manifest = create_backup(settings, target)
+    if args.json:
+        print(json.dumps({**manifest.to_dict(), "path": str(target)}, ensure_ascii=False))
+        return 0
+
+    print(f"备份完成：{target}")
+    print(
+        f"  账号 {manifest.accounts} 个，账本 {manifest.ledger_rows} 行，"
+        f"会话 {manifest.session_files} 个文件，代码 {manifest.code_files} 个文件"
+        f"（schema v{manifest.schema_version}）"
+    )
+    print(f"  包大小：{_human_size(target.stat().st_size)}")
+    print(f'  别忘了演练：agentcode backup verify "{target}"')
+    return 0
+
+
+def _backup_verify(args: argparse.Namespace) -> int:
+    """演练：把包解开、真的把库打开读一遍。"""
+    from agentcode.backup import verify_backup
+
+    info = verify_backup(args.archive, detailed=True)
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False))
+        return 0
+
+    names = "、".join(info["account_names"]) or "（还没有账号）"
+    print(f"备份可用：{info['path']}")
+    print(f"  备份时间：{info['created_at'] or '（包里没写）'}")
+    print(f"  账号 {info['account_count']} 个：{names}")
+    print(
+        f"  账本 {info['ledger_rows']} 行，会话 {info['session_files']} 个文件，"
+        f"代码 {info['code_files']} 个文件"
+    )
+    print(f"  数据库：能打开、完整性检查通过，schema v{info['schema_version']}")
+    return 0
+
+
+def _backup_restore(args: argparse.Namespace) -> int:
+    """恢复：默认要人工确认一次，就地覆盖是最危险的操作，值得多按一下。"""
+    from agentcode.backup import restore_backup
+
+    target = Path(args.to)
+    occupied = target.is_dir() and any(target.iterdir())
+    if not args.yes:
+        print(f"准备把 {args.archive} 解到：{target}")
+        if occupied:
+            print(
+                "注意：目标目录非空。"
+                + ("旧数据会改名留一份。" if args.force else "不加 --force 会被拒绝。")
+            )
+        try:
+            answer = input("确认恢复请输入 yes：").strip().lower()
+        except EOFError:
+            print("读不到确认输入（非交互环境）；确定要恢复请加 --yes。")
+            return 1
+        if answer not in {"yes", "y"}:
+            print("已取消，磁盘上什么都没改。")
+            return 1
+
+    report = restore_backup(args.archive, target, force=args.force)
+    print(f"恢复完成：{report['path']}")
+    print(f"  账号 {report['accounts']} 个，写回 {report['files']} 个文件")
+    if report["moved_aside"]:
+        print(f"  旧数据留在：{report['moved_aside']}（确认新数据没问题再自己删）")
+    print("  提醒：换数据之前先把服务停掉，别让两个进程同时写同一个库。")
+    return 0
+
+
+def _backup_list(args: argparse.Namespace) -> int:
+    """列出目录里有哪些备份（只看清单，不解包）。"""
+    from agentcode.backup import BackupError, read_manifest
+
+    directory = Path(args.dir or "backups")
+    if not directory.is_dir():
+        print(f"还没有备份：{directory} 不存在。用 agentcode backup create 备一份。")
+        return 0
+
+    archives = sorted(directory.glob("*.tar.gz"))
+    if not archives:
+        print(f"还没有备份：{directory} 里没有 .tar.gz 文件。")
+        return 0
+
+    print(f"{directory} 里的备份（新的在上面）：")
+    for archive in sorted(archives, key=lambda item: item.stat().st_mtime, reverse=True):
+        size = _human_size(archive.stat().st_size)
+        try:
+            manifest = read_manifest(archive)
+        except BackupError as exc:
+            print(f"  {archive.name}  [{size}]  读不出来：{exc}")
+            continue
+        print(
+            f"  {archive.name}  [{size}]  {manifest.created_at or '时间未知'}  "
+            f"账号 {manifest.accounts} 个，会话 {manifest.session_files} 个文件，"
+            f"代码 {manifest.code_files} 个文件（schema v{manifest.schema_version}）"
+        )
+    print("  这里只看了清单；能不能恢复要用 agentcode backup verify <包> 演练一遍。")
+    return 0
+
+
+def _human_size(size: int) -> str:
+    """把字节数写成好读的大小。"""
+    value = float(size)
+    for unit in ("B", "KB", "MB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 def _costs_command(args: argparse.Namespace) -> int:
     """把用量换算成钱：花销、每账号成本、每个套餐还剩多少毛利。
 
@@ -884,6 +1063,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "billing":
             return _billing_command(args)
+
+        if args.command == "backup":
+            return _backup_command(args)
 
         if args.command == "test-gen":
             return _testgen_command(args)

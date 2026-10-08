@@ -17,6 +17,7 @@ from agentcode.accounts import AccountStore
 from agentcode.backup import (
     BackupError,
     create_backup,
+    read_manifest,
     restore_backup,
     verify_backup,
 )
@@ -170,6 +171,18 @@ def test_verify_rejects_a_corrupt_database_inside(tmp_path):
     with pytest.raises(BackupError, match="数据库"):
         verify_backup(broken)
     assert good.is_file()
+
+
+def test_read_manifest_does_not_need_the_database(tmp_path):
+    """列一列有哪些备份，不该依赖库能打开——库坏的那天，正是你要看它的时候。"""
+    settings = _settings(tmp_path)
+    _seed(settings)
+    archive = create_backup(settings, tmp_path / "backup.tar.gz")
+
+    manifest = read_manifest(archive)
+    assert manifest.accounts == 1
+    assert manifest.session_files == 1
+    assert manifest.path == Path(archive)
 
 
 # ---------------------------------------------------------------- 恢复

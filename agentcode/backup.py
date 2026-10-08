@@ -232,6 +232,30 @@ def _write_archive(work_dir: Path, destination: Path) -> None:
 # ---------------------------------------------------------------------- 校验（演练）
 
 
+def read_manifest(archive: str | Path) -> BackupManifest:
+    """只读包里的清单，**不打开数据库**。
+
+    比 :func:`verify_backup` 便宜得多（不解包、不读库），用来"列一列有哪些备份"。
+    代价是它只复述包自己的说法——要确认这个包能不能恢复，仍然必须走
+    ``verify_backup``。两者分开是有意的：库已经坏了的时候，你更需要的是
+    先看清手上有哪几份包，而不是让列清单也跟着失败。
+    """
+    path = _as_path(archive)
+    if not path.is_file():
+        raise BackupError(f"找不到备份文件：{path}")
+    with _open_archive(path) as tar:
+        declared, _raw = _read_manifest(tar)
+    return BackupManifest(
+        created_at=declared.created_at or _file_mtime(path),
+        accounts=declared.accounts,
+        ledger_rows=declared.ledger_rows,
+        session_files=declared.session_files,
+        code_files=declared.code_files,
+        schema_version=declared.schema_version,
+        path=path,
+    )
+
+
 def verify_backup(
     archive: str | Path, *, detailed: bool = False
 ) -> BackupManifest | dict[str, object]:
