@@ -270,6 +270,9 @@ class AccountStore:
             self._conn.execute("DELETE FROM usage_ledger WHERE account_id = ?", (cleaned,))
             self._conn.execute("DELETE FROM usage WHERE account_id = ?", (cleaned,))
             self._conn.execute("DELETE FROM orders WHERE account_id = ?", (cleaned,))
+            # 令牌是能继续花钱的凭据，注销必须一起废掉
+            self._conn.execute("DELETE FROM api_tokens WHERE account_id = ?", (cleaned,))
+            self._conn.execute("DELETE FROM notifications WHERE account_id = ?", (cleaned,))
             cursor = self._conn.execute("DELETE FROM accounts WHERE id = ?", (cleaned,))
         return cursor.rowcount > 0
 
@@ -570,6 +573,96 @@ class AccountStore:
         with self._lock, self._conn:
             cursor = self._conn.execute("DELETE FROM audit_log WHERE at < ?", (stamp,))
         return int(cursor.rowcount or 0)
+
+    # ------------------------------------------------------------------ 通知
+    # ------------------------------------------------------------------ API 令牌
+
+    def create_api_token(
+        self,
+        account_id: str,
+        *,
+        name: str,
+        prefix: str,
+        token_hash: str,
+        expires_at: str | None = None,
+    ) -> dict[str, object]:
+        """落一条 API 令牌（调用方负责生成明文并只传哈希进来）。"""
+        record = {
+            "id": uuid.uuid4().hex[:12],
+            "account_id": str(account_id),
+            "name": str(name or "").strip() or "未命名令牌",
+            "prefix": str(prefix),
+            "token_hash": str(token_hash),
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "last_used_at": None,
+            "expires_at": expires_at,
+            "is_active": True,
+        }
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO api_tokens (id, account_id, name, prefix, token_hash, created_at,"
+                " last_used_at, expires_at, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    record["id"],
+                    record["account_id"],
+                    record["name"],
+                    record["prefix"],
+                    record["token_hash"],
+                    record["created_at"],
+                    record["last_used_at"],
+                    record["expires_at"],
+                ),
+            )
+        return record
+
+    @staticmethod
+    def _row_to_token(row: sqlite3.Row) -> dict[str, object]:
+        """**不带 token_hash**：列表会流到页面上，哈希没必要出门。"""
+        return {
+            "id": row["id"],
+            "account_id": row["account_id"],
+            "name": row["name"],
+            "prefix": row["prefix"],
+            "created_at": row["created_at"],
+            "last_used_at": row["last_used_at"] or "",
+            "expires_at": row["expires_at"] or "",
+            "is_active": bool(row["is_active"]),
+        }
+
+    def api_tokens(self, account_id: str) -> list[dict[str, object]]:
+        """某个账号的全部令牌，新的在前。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM api_tokens WHERE account_id = ? ORDER BY created_at DESC, rowid DESC",
+                (str(account_id or ""),),
+            ).fetchall()
+        return [self._row_to_token(row) for row in rows]
+
+    def find_api_token(self, token_hash: str) -> dict[str, object] | None:
+        """按哈希找令牌（认证走这条；找不到返回 None）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM api_tokens WHERE token_hash = ?", (str(token_hash or ""),)
+            ).fetchone()
+        return self._row_to_token(row) if row else None
+
+    def touch_api_token(self, token_id: str) -> None:
+        """记一下"这把令牌刚被用过"。"""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"), str(token_id)),
+            )
+
+    def revoke_api_token(self, account_id: str, token_id: str) -> bool:
+        """吊销一把令牌；只能吊销自己的（``account_id`` 一起进 WHERE）。"""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE api_tokens SET is_active = 0 WHERE id = ? AND account_id = ?"
+                " AND is_active = 1",
+                (str(token_id or ""), str(account_id or "")),
+            )
+        return cursor.rowcount > 0
 
     # ------------------------------------------------------------------ 通知
 

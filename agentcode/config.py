@@ -90,6 +90,9 @@ DEFAULT_AUDIT_DAYS = 180
 DEFAULT_TRASH_DAYS = 30
 #: 用户通知：webhook 与 SMTP 二选一（都没配就只记台账、不假装发出去）
 DEFAULT_NOTIFY_WEBHOOK = ""
+#: 对外开放 API（POST /v1/run）：令牌必须由用户自己生成，所以默认开着也不会被白用；
+#: 要彻底关掉（比如不想让外部流量打到这个实例）就设 false
+DEFAULT_API_ENABLED = True
 DEFAULT_SMTP_HOST = ""
 DEFAULT_SMTP_PORT = 465
 DEFAULT_SMTP_USER = ""
@@ -213,6 +216,8 @@ class Settings:
     trash_days: int = DEFAULT_TRASH_DAYS
     #: 用户通知：webhook（POST 一段 JSON）；留空则看 SMTP
     notify_webhook: str = DEFAULT_NOTIFY_WEBHOOK
+    #: 对外开放 API：false 时 /v1/* 一律 404
+    api_enabled: bool = DEFAULT_API_ENABLED
     #: 用户通知：SMTP 发信（标准库 smtplib，无新依赖）
     smtp_host: str = DEFAULT_SMTP_HOST
     smtp_port: int = DEFAULT_SMTP_PORT
@@ -338,6 +343,7 @@ class Settings:
             audit_days=_to_int(pick("AGENT_AUDIT_DAYS"), DEFAULT_AUDIT_DAYS),
             trash_days=_to_int(pick("AGENT_TRASH_DAYS"), DEFAULT_TRASH_DAYS),
             notify_webhook=str(pick("AGENT_NOTIFY_WEBHOOK", DEFAULT_NOTIFY_WEBHOOK) or ""),
+            api_enabled=_to_bool(pick("AGENT_API_ENABLED"), DEFAULT_API_ENABLED),
             smtp_host=str(pick("AGENT_SMTP_HOST", DEFAULT_SMTP_HOST) or ""),
             smtp_port=_to_int(pick("AGENT_SMTP_PORT"), DEFAULT_SMTP_PORT),
             smtp_user=str(pick("AGENT_SMTP_USER", DEFAULT_SMTP_USER) or ""),
@@ -481,6 +487,7 @@ class Settings:
             "AGENT_TRASH_DAYS": str(self.trash_days)
             + ("（不自动清理）" if self.trash_days <= 0 else ""),
             "AGENT_NOTIFY_WEBHOOK": mask_secret(self.notify_webhook),
+            "AGENT_API_ENABLED": "是" if self.api_enabled else "否（/v1/* 关闭）",
             "AGENT_SMTP_HOST": self.smtp_host or "（未配置）",
             "AGENT_SMTP_PORT": str(self.smtp_port),
             "AGENT_SMTP_USER": self.smtp_user or "（未配置）",
