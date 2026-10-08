@@ -274,6 +274,13 @@ def build_parser() -> argparse.ArgumentParser:
     token_revoke.add_argument("account", help="账号名")
     token_revoke.add_argument("token_id", help="令牌 id（用 token list 查）")
 
+    api_parser = subparsers.add_parser("api", help="对外 API 的任务台账（运维侧）")
+    api_sub = api_parser.add_subparsers(dest="api_command", required=True)
+    api_list = api_sub.add_parser("list", help="看某个账号最近的 API 任务")
+    api_list.add_argument("account", help="账号名")
+    api_list.add_argument("--limit", type=int, default=20, help="看多少条，默认 20")
+    api_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+
     trash_parser = subparsers.add_parser("trash", help="回收站：误删的东西在这里")
     trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
     trash_list = trash_sub.add_parser("list", help="看某个账号的回收站")
@@ -690,6 +697,39 @@ def _token_command(args: argparse.Namespace) -> int:
         used = item["last_used_at"] or "从未使用"
         expires = item["expires_at"] or "不过期"
         print(f"  {item['id']}  {item['name']:<12} {item['prefix']}…  {state}  最近使用 {used}  到期 {expires}")
+    return 0
+
+
+def _api_command(args: argparse.Namespace) -> int:
+    """对外 API 的任务台账：用户说"我提交的任务一直没结果"时查这里。
+
+    卡在 ``running`` 的旧记录会在定期清理里被标成失败（服务重启、线程意外死掉
+    都会留下这种记录）——所以看到失败先看 ``error`` 写了什么，那是原因。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.config import DEFAULT_DB_PATH
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    account = store.get(args.account)
+    if account is None:
+        print(f"错误：没有这个账号：{args.account}")
+        return 2
+    runs = store.api_runs(account.id, limit=max(1, int(args.limit)))
+    if args.json:
+        print(json.dumps({"runs": runs}, ensure_ascii=False))
+        return 0
+    if not runs:
+        print(f"{account.name} 还没有通过 API 提交过任务。")
+        return 0
+    print(f"{account.name} 最近 {len(runs)} 个 API 任务：")
+    for item in runs:
+        task = str(item["task"]).replace("\n", " ")[:28]
+        mark = {"running": "跑着", "succeeded": "成功", "failed": "失败"}.get(
+            str(item["status"]), str(item["status"])
+        )
+        key = f"  幂等键 {item['request_key']}" if item["request_key"] else ""
+        print(f"  {item['created_at']}  {item['run_id']}  {item['agent']:<12} {mark}  {task}{key}")
+    print("  要看某个任务的答案：GET /v1/runs/<run_id>（带令牌）")
     return 0
 
 
@@ -1487,6 +1527,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "token":
             return _token_command(args)
+
+        if args.command == "api":
+            return _api_command(args)
 
         if args.command == "test-gen":
             return _testgen_command(args)

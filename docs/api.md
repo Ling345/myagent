@@ -44,6 +44,10 @@ Authorization: Bearer agk_xxxxxxxxxxxxxxxxxxxxxxxx
 | `agent` | 否 | `react`（默认）/ `plan_and_solve` / `reflection` / `coding` / `test_gen` / `echo` |
 | `session_id` | 否 | 带上它就**延续同一个会话**（上下文记忆会在两次调用之间保留） |
 | `max_steps` | 否 | 本轮最多跑几步；不填按服务端配置 |
+| `async` | 否 | `true` 时立刻返回 `202` + `run_id`，任务在后台跑（见第 4 节） |
+
+请求头还可以带一个 **`Idempotency-Key`**（见第 5 节）：网络抖动重发时，
+同一个键只会跑一次、只扣一次费。
 
 ```bash
 curl -sS -X POST "$AGENTCODE_URL/v1/run" \
@@ -95,7 +99,51 @@ curl -sS "$AGENTCODE_URL/v1/me" -H "Authorization: Bearer $AGENTCODE_TOKEN"
 
 建议脚本开跑前先看一眼 `remaining`，省得跑到一半拿到 `402`。
 
-## 4. 错误码
+## 4. 异步：长任务不要干等
+
+写代码这类任务动辄几十秒，同步接口很容易超过客户端超时。加 `"async": true`：
+
+```bash
+curl -sS -X POST "$AGENTCODE_URL/v1/run" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"agent": "coding", "task": "给 utils.py 补测试", "async": true}'
+# 202 {"run_id":"9f2c…","status":"running","poll":"/v1/runs/9f2c…"}
+
+curl -sS "$AGENTCODE_URL/v1/runs/9f2c…" -H "Authorization: Bearer $AGENTCODE_TOKEN"
+# 跑完：{"status":"succeeded","success":true,"answer":"…","usage":{…},"finished_at":"…"}
+```
+
+- `GET /v1/runs/<run_id>`：查状态与结果。`status` 是 `running` / `succeeded` / `failed`；
+- `GET /v1/runs?limit=20`：列最近的任务（不带结果正文，适合做后台列表）；
+- **结果存在数据库里**，所以服务重启之后照样取得到（不是内存里的临时状态）；
+- 保留 `AGENT_API_RUNS_DAYS` 天（默认 7），过期就清掉；
+- 服务重启或线程意外中断留下的 `running` 记录，会被定期清理标成 `failed`
+  并写明原因——不会让你一直轮询一个死任务。
+
+## 5. 幂等键：重发不等于重跑
+
+客户端超时之后最常见的做法是"原样重发一次"。带 `Idempotency-Key` 就不会变成
+"跑两次、扣两次"：
+
+```bash
+curl -sS -X POST "$AGENTCODE_URL/v1/run" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" \
+  -H "Idempotency-Key: ci-42-$GITHUB_RUN_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "coding", "task": "给 utils.py 补测试"}'
+```
+
+同一个账号 + 同一个键：
+
+| 那一单的状态 | 你会收到 |
+| --- | --- |
+| 已经跑完 | 原来的结果，多一个 `"idempotent_replay": true` |
+| 还在跑 | `202` + 同一个 `run_id` + `poll`，**不会再开一单** |
+
+键由你自己定，建议带上业务上下文（比如 CI 的 run id）。**不要**用随机数——
+那就等于没带。同一个键最多保留 `AGENT_API_RUNS_DAYS` 天。
+
+## 6. 错误码
 
 | 状态码 | 什么意思 | 该怎么办 |
 | --- | --- | --- |
@@ -106,7 +154,7 @@ curl -sS "$AGENTCODE_URL/v1/me" -H "Authorization: Bearer $AGENTCODE_TOKEN"
 | `429` | 请求太频 / 并发太多 | 退避重试；响应里有 `Retry-After` |
 | `502` | 任务没跑成功（模型侧错误、超出单次预算等） | 看 `error` 字段；可以重试 |
 
-## 5. 限流与计费
+## 7. 限流与计费
 
 - **计费**：按这次运行真实消耗的 token 记账，输入/输出分开记（两者单价差好几倍）。
   和网页、CLI 走的是**同一本账**——`agentcode billing costs` 里能一起看到。
@@ -115,7 +163,7 @@ curl -sS "$AGENTCODE_URL/v1/me" -H "Authorization: Bearer $AGENTCODE_TOKEN"
 - **上限**：每日 token 额度、每分钟请求数、并发数、单次运行 token 预算，
   都在服务端 `.env` 里配（见 `README.md` 的「配置说明」）。
 
-## 6. 脚本示例
+## 8. 脚本示例
 
 ### Python
 
@@ -159,7 +207,7 @@ print(data["answer"], data["usage"])
 
 令牌放进仓库的 **Secrets**，不要写进 workflow 文件。
 
-## 7. 安全
+## 9. 安全
 
 - 令牌等同密码：**只放环境变量或 secret**，不要提交进仓库、不要贴进聊天记录。
 - 泄露了就**立刻吊销**（网页「我的数据」或 `agentcode token revoke`），
@@ -169,12 +217,11 @@ print(data["answer"], data["usage"])
   （`agentcode audit list --action-prefix api.`）。审计里永远没有令牌明文。
 - 对外提供服务时请务必用 **HTTPS**：明文 HTTP 会让令牌在网络里裸奔。
 
-## 8. 现在还没有的（诚实列一下）
+## 10. 现在还没有的（诚实列一下）
 
 | 缺什么 | 影响 |
 | --- | --- |
-| 幂等键 | 网络抖动后重发可能变成"跑两次、扣两次"；脚本侧请自己做去重 |
-| 异步任务 + 回调 | 现在只有同步等待；超长任务得自己把超时设大 |
+| 任务完成的回调 | 异步任务要自己轮询（`GET /v1/runs/<id>`）；我们不会主动通知你的服务 |
 | 流式接口 | 网页有 SSE，对外还没开；需要边跑边看的话请提需求 |
 | 按接口细分的权限 | 一把令牌能调全部接口；要"只读令牌"之类的还得再做 |
 
