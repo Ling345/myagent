@@ -622,6 +622,11 @@ def _backup_command(args: argparse.Namespace) -> int:
     except BackupError as exc:
         print(f"错误：{exc}")
         return 1
+    except OSError as exc:
+        # 写到一半磁盘满了、目录没权限、文件被占用——这些都要给句人话，
+        # 而不是甩一段调用栈
+        print(f"错误：{exc}（磁盘满了、没有权限，或文件正被占用？）")
+        return 1
 
 
 def _backup_create(args: argparse.Namespace) -> int:

@@ -172,6 +172,25 @@ def test_cli_backup_restore_without_force_stops_on_a_non_empty_target(
     assert (target / "别动.txt").read_text(encoding="utf-8") == "重要"
 
 
+def test_cli_backup_restore_turns_a_filesystem_error_into_a_readable_message(
+    tmp_path, monkeypatch, capsys
+):
+    """恢复写盘失败（磁盘满 / 文件被占用）要给一句人话，不能甩调用栈。"""
+    from agentcode import backup as backup_module
+
+    archive = _make_backup(tmp_path, monkeypatch, capsys)
+
+    def _boom(_archive, _target, **_kwargs):
+        raise OSError("文件被另一个进程占用")
+
+    monkeypatch.setattr(backup_module, "restore_backup", _boom)
+    target = tmp_path / "restored"
+    assert main(["backup", "restore", str(archive), "--to", str(target), "--yes"]) == 1
+    output = capsys.readouterr().out
+    assert "错误" in output
+    assert "被占用" in output
+
+
 # ---------------------------------------------------------------- list
 
 

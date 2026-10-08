@@ -586,7 +586,14 @@ def _move_aside(target: Path) -> Path:
     while candidate.exists():
         suffix += 1
         candidate = target.parent / f"{target.name}.旧数据-{stamp}-{suffix}"
-    target.rename(candidate)
+    try:
+        target.rename(candidate)
+    except OSError as exc:
+        # Windows 上正被打开的文件不能改名——最可能的原因就是服务还在跑
+        raise BackupError(
+            f"旧数据改名失败（{target} → {candidate}）：{exc}。"
+            "多半是服务还在跑、文件被占用——先把服务停掉再恢复。"
+        ) from exc
     return candidate
 
 
