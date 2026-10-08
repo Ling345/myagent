@@ -272,6 +272,7 @@ class AccountStore:
             self._conn.execute("DELETE FROM orders WHERE account_id = ?", (cleaned,))
             # 令牌是能继续花钱的凭据，注销必须一起废掉
             self._conn.execute("DELETE FROM api_tokens WHERE account_id = ?", (cleaned,))
+            self._conn.execute("DELETE FROM api_runs WHERE account_id = ?", (cleaned,))
             self._conn.execute("DELETE FROM notifications WHERE account_id = ?", (cleaned,))
             cursor = self._conn.execute("DELETE FROM accounts WHERE id = ?", (cleaned,))
         return cursor.rowcount > 0
@@ -663,6 +664,139 @@ class AccountStore:
                 (str(token_id or ""), str(account_id or "")),
             )
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------- API 任务台账
+
+    @staticmethod
+    def _row_to_api_run(row: sqlite3.Row, *, with_result: bool = True) -> dict[str, object]:
+        record: dict[str, object] = {
+            "run_id": row["run_id"],
+            "account_id": row["account_id"] or "",
+            "token_id": row["token_id"] or "",
+            "agent": row["agent"],
+            "task": row["task"],
+            "session_id": row["session_id"] or "",
+            "status": row["status"],
+            "request_key": row["request_key"] or "",
+            "error": row["error"] or "",
+            "created_at": row["created_at"],
+            "finished_at": row["finished_at"] or "",
+        }
+        if with_result:
+            try:
+                record["result"] = json.loads(row["result"]) if row["result"] else None
+            except json.JSONDecodeError:
+                record["result"] = None
+        return record
+
+    def create_api_run(
+        self,
+        run_id: str,
+        *,
+        account_id: str,
+        agent: str,
+        task: str,
+        token_id: str = "",
+        session_id: str = "",
+        request_key: str = "",
+    ) -> bool:
+        """落一条"正在跑"的任务。**同一个幂等键只允许一条**，重发返回 False。"""
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "INSERT INTO api_runs (run_id, account_id, token_id, agent, task, session_id,"
+                    " status, request_key, created_at) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+                    (
+                        str(run_id),
+                        str(account_id or "") or None,
+                        token_id or None,
+                        str(agent),
+                        str(task),
+                        session_id or None,
+                        request_key or None,
+                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            return False  # 幂等键撞了：这一单已经在跑/跑完了
+        return True
+
+    def finish_api_run(
+        self, run_id: str, *, result: dict[str, Any] | None = None, error: str = ""
+    ) -> None:
+        """写回任务结果（成功或失败都走这里）。"""
+        status = "failed" if error else "succeeded"
+        payload = None if result is None else json.dumps(result, ensure_ascii=False, default=str)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE api_runs SET status = ?, result = ?, error = ?, finished_at = ?"
+                " WHERE run_id = ?",
+                (
+                    status,
+                    payload,
+                    error or None,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    str(run_id),
+                ),
+            )
+
+    def api_run(self, run_id: str) -> dict[str, object] | None:
+        """按 run_id 取一条。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM api_runs WHERE run_id = ?", (str(run_id or ""),)
+            ).fetchone()
+        return self._row_to_api_run(row) if row else None
+
+    def find_api_run_by_key(self, account_id: str, request_key: str) -> dict[str, object] | None:
+        """按幂等键找那一单（认出来就是"同一个请求重发了"）。"""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM api_runs WHERE account_id = ? AND request_key = ?",
+                (str(account_id or ""), str(request_key or "")),
+            ).fetchone()
+        return self._row_to_api_run(row) if row else None
+
+    def api_runs(self, account_id: str, limit: int = 20) -> list[dict[str, object]]:
+        """某个账号最近的任务（不带结果正文，列表不需要那么大）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM api_runs WHERE account_id = ?"
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (str(account_id or ""), max(1, int(limit))),
+            ).fetchall()
+        return [self._row_to_api_run(row, with_result=False) for row in rows]
+
+    def prune_api_runs(self, days: int, *, now: datetime | None = None) -> int:
+        """删掉超过 ``days`` 天的任务记录；``days <= 0`` 表示永久保留。"""
+        if days <= 0:
+            return 0
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=int(days))
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM api_runs WHERE created_at < ?",
+                (cutoff.isoformat(timespec="seconds"),),
+            )
+        return int(cursor.rowcount or 0)
+
+    def mark_stale_api_runs(self, older_than_seconds: int = 3600) -> int:
+        """把"卡在 running"的老任务标成失败。
+
+        服务重启或线程意外死掉时，内存里那个任务就没了；不标出来的话，
+        调用方会一直轮询一个永远不会结束的 run_id。
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(0, int(older_than_seconds)))
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE api_runs SET status = 'failed',"
+                " error = COALESCE(error, '服务重启或任务中断，结果没能保存。'),"
+                " finished_at = ? WHERE status = 'running' AND created_at < ?",
+                (
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    cutoff.isoformat(timespec="seconds"),
+                ),
+            )
+        return int(cursor.rowcount or 0)
 
     # ------------------------------------------------------------------ 通知
 
