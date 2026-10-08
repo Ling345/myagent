@@ -57,6 +57,8 @@ const els = {
   trashHint: document.getElementById("trash-hint"),
   trashList: document.getElementById("trash-list"),
   trashEmpty: document.getElementById("trash-empty"),
+  notifyEmail: document.getElementById("notify-email"),
+  notifySave: document.getElementById("notify-save"),
   uploadButton: document.getElementById("upload-button"),
   uploadInput: document.getElementById("upload-input"),
   uploadChips: document.getElementById("upload-chips"),
@@ -1050,6 +1052,7 @@ function openDataPanel() {
   els.dataConfirmInput.value = "";
   els.dataConfirmName.textContent = (state.account && state.account.name) || "";
   loadTrash();
+  loadNotifyEmail();
 }
 
 function exportMyData() {
@@ -1076,6 +1079,36 @@ async function purgeMyCode() {
 }
 
 /* ------------------------------------------------------------ 回收站 */
+
+/**
+ * 接收通知的邮箱。
+ *
+ * 只在保存时才校验（服务端校验格式并回中文原因）；留空就是"不接收"，
+ * 这一点要写在提示里，否则用户会以为关不掉。
+ */
+async function loadNotifyEmail() {
+  if (!els.notifyEmail) return;
+  try {
+    const payload = await getJSON("/api/account/email");
+    els.notifyEmail.value = payload.email || "";
+  } catch (error) {
+    els.notifyEmail.placeholder = error.message;
+  }
+  scrollPanelIntoView();
+}
+
+async function saveNotifyEmail() {
+  try {
+    const payload = await postJSON("/api/account/email", { email: els.notifyEmail.value });
+    els.notifyEmail.value = payload.email || "";
+    els.runStatus.textContent = payload.email
+      ? `已保存：通知会发到 ${payload.email}。`
+      : "已清空：不再接收通知。";
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+  }
+}
+
 
 /**
  * 回收站：删错的东西在这里，能恢复，也能彻底删掉。
@@ -1107,9 +1140,20 @@ async function loadTrash() {
   }
   // 面板在侧栏底部，而且高度随回收站内容变化；填完之后再把下沿带进视野，
   // 否则"滚到位"是照填之前那个矮面板算的，填完就又被顶出屏幕了。
-  if (!els.dataPanel.hidden) {
-    els.dataPanel.scrollIntoView({ block: "end" });
-  }
+  scrollPanelIntoView();
+}
+
+/**
+ * 把「我的数据」面板滚进视野。
+ *
+ * 用显式滚动而不是 `scrollIntoView`：实测后者在多级滚动容器里没把侧栏带到位
+ * （面板下沿还在视口外一百多像素）。面板本身是个滚动容器，所以这里滚的是它
+ * 的父级侧栏——滚到最底，下沿自然贴住视口底部。
+ */
+function scrollPanelIntoView() {
+  if (els.dataPanel.hidden) return;
+  const sidebar = els.dataPanel.closest(".sidebar");
+  if (sidebar) sidebar.scrollTop = sidebar.scrollHeight;
 }
 
 function renderTrashItem(item) {
@@ -1205,6 +1249,7 @@ els.dataClose.addEventListener("click", () => {
 els.dataExport.addEventListener("click", exportMyData);
 els.dataPurge.addEventListener("click", purgeMyCode);
 els.trashEmpty.addEventListener("click", emptyMyTrash);
+els.notifySave.addEventListener("click", saveNotifyEmail);
 els.dataDelete.addEventListener("click", () => {
   els.dataConfirm.hidden = false;
   els.dataConfirmInput.focus();

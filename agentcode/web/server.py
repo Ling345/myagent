@@ -398,6 +398,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         """当前服务进程的账单服务（套餐、订单、用量）。"""
         return self.server.billing  # type: ignore[attr-defined]
 
+    def _notifier(self) -> Any:
+        """通知服务（每次请求现取，配置改了刷新页面就生效）。
+
+        同步发送、不另开线程：渠道超时都卡在 10 秒内，而且通知大多发生在
+        "用户本来就要等一个结果"的时刻（额度用尽、登录失败、注销）。
+        换后台线程的代价是调用方再也说不清"到底发出去没有"，不值。
+        """
+        from agentcode.notify import Notifier
+
+        return Notifier(self.server.accounts, self._settings())  # type: ignore[attr-defined]
+
     def _handle_upload(self) -> None:
         """收一个文本文件，存进调用者**自己**的代码工作目录。
 
@@ -602,9 +613,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         from agentcode.lifecycle import delete_account
         from agentcode import audit as AUDIT
+        from agentcode import notify as NOTIFY
 
         # 审计要**先记**：账号马上就被删了，记的时候它的名字还在
         self._audit(AUDIT.ACCOUNT_DELETE, target=account.name)
+        # 最后一条消息：邮箱是删除前抓下来的，删完还能发得出去
+        self._notifier().notify(
+            NOTIFY.EVENT_ACCOUNT_DELETED, account=account, email=account.email or ""
+        )
         deleted = delete_account(self.server.accounts, self._settings(), account)  # type: ignore[attr-defined]
         # 内存里缓存的会话仓库也一并丢掉
         with self.server.store_lock:  # type: ignore[attr-defined]
@@ -693,6 +709,46 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         )
         self._audit(AUDIT.TRASH_PURGE, target="回收站", detail={"emptied": removed})
         self._send_json({"removed": removed, "trash": self._trash_payload()})
+
+    # ------------------------------------------------------------ 通知邮箱
+
+    def _serve_email(self) -> None:
+        """看自己填的接收邮箱。"""
+        if not self._auth_ok():
+            return
+        account = getattr(self, "_account", None)
+        self._send_json({"email": (account.email or "") if account else ""})
+
+    def _set_email(self, payload: dict[str, Any]) -> None:
+        """设置或清空接收通知的邮箱（空串 = 清空）。
+
+        只做格式校验，**不做点链接验证**：没有域名和稳定发信能力时，
+        验证链接只会造出一堆点不开的信。这是防手滑，不是防伪造。
+        """
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.accounts import normalize_email
+        from agentcode.core.errors import AgentCodeError
+
+        account = getattr(self, "_account", None)
+        if account is None:
+            self._send_json({"error": "请先登录。"}, status=401)
+            return
+        try:
+            address = normalize_email(payload.get("email"))
+        except AgentCodeError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self.server.accounts.set_email(account.name, address)  # type: ignore[attr-defined]
+        self._audit(AUDIT.ACCOUNT_EMAIL, target=address or "（清空）")
+        self._send_json({"email": address})
+
+    def _notify_quota(self, account: Account) -> None:
+        """额度用尽：一天只提醒一次（用户多半是当天最后几次请求撞上的）。"""
+        store: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        used, _calls = store.usage_today(account.id)
+        self._notifier().quota_exhausted(account, limit=store.daily_limit(account), used=used)
 
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
@@ -895,6 +951,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/trash":
             self._serve_trash()
             return
+        if path == "/api/account/email":
+            self._serve_email()
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
     def _account_payload(self, account: Account) -> dict[str, Any]:
@@ -907,6 +966,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         return {
             "name": account.name,
             "plan": account.plan,
+            "email": account.email or "",
             "plan_title": plan.title,
             "plan_expires_at": account.plan_expires_at,
             "unlimited": unlimited,
@@ -974,6 +1034,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/trash/restore",
             "/api/trash/purge",
             "/api/trash/empty",
+            "/api/account/email",
         ):
             self._drain_body()
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
@@ -1049,6 +1110,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/account/delete":
             self._delete_account(payload)
+            return
+
+        if path == "/api/account/email":
+            self._set_email(payload)
             return
 
         if path == "/api/trash/restore":
@@ -1128,6 +1193,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             allowed, reason = accounts.check_quota(account)
             if not allowed:
                 REJECTIONS.inc(reason="quota")
+                self._notify_quota(account)
                 self._send_json({"error": reason}, status=402)
                 return
         # 套餐收口：免费套餐不允许执行代码时，连工具都不下发给模型
@@ -1218,6 +1284,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 detail={"reason": "bad_credentials"},
                 ip=ip,
             )
+            # 连续失败是"有人在猜密码"的信号，提醒账号本人（没填邮箱就跳过）
+            target = accounts.get(name)
+            if target is not None:
+                self._notifier().check_login_failures(account=target)
             self._send_json({"error": "账号或密码不正确。"}, status=401)
             return
 

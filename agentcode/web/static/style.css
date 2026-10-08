@@ -1047,6 +1047,37 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.notify {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.notify-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.notify-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.notify-row .data-button {
+  width: auto;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  text-align: center;
+}
+
 .trash-head {
   display: flex;
   align-items: baseline;
@@ -1190,9 +1221,11 @@ button:disabled {
 
 .billing-panel {
   /* 不参与收缩：否则会被上面的会话列表挤成一条缝（实测只剩 30px 高）。
-     高度按内容走，最长到 70vh，超出自己滚动。 */
+     高度按内容走，最长到 80vh，超出自己滚动。
+     80 而不是 70：数据面板里现在有导出、回收站、通知邮箱，70vh 会窄出
+     几十像素的内部滚动条，而面板本身还得整块看得见。 */
   flex: 0 0 auto;
-  max-height: 70vh;
+  max-height: 80vh;
   margin: 8px 12px 12px;
   padding: 14px;
   border-radius: 14px;
