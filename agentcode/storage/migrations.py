@@ -238,6 +238,33 @@ def _v5_email_and_notifications(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v6_api_tokens(conn: sqlite3.Connection) -> None:
+    """API 令牌：让程序也能用这个服务。
+
+    **只存哈希**。令牌是能直接花钱的凭据，库被看到（备份、误提交、拖库）
+    也不能拿去用——和密码一个道理。``prefix`` 留明文前几位，只是为了在界面上
+    让用户认出"这是哪一把"。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            prefix TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            expires_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_tokens_account ON api_tokens(account_id, created_at DESC)"
+    )
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
@@ -245,6 +272,7 @@ MIGRATIONS: list[Migration] = [
     Migration(3, "用量账本分开记输入/输出 token", _v3_usage_split),
     Migration(4, "操作审计日志", _v4_audit_log),
     Migration(5, "账号邮箱与通知台账", _v5_email_and_notifications),
+    Migration(6, "API 令牌", _v6_api_tokens),
 ]
 
 
