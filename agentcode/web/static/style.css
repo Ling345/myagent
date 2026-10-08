@@ -1041,6 +1041,75 @@ button:disabled {
   text-align: center;
 }
 
+.trash {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.trash-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  /* 面板本身不高；回收站先给几行，多了在里面滚，别把整块面板顶出屏幕 */
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.trash-item {
+  display: flex;
+  /* 侧栏只有 160 多像素宽：名称与按钮竖着排，横着排会把文字挤成一列字 */
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.trash-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.trash-when {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trash-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.trash-actions .data-button {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.trash-empty {
+  margin: 2px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .legal-links {
   margin: 4px 12px 12px;
   color: var(--text-muted);

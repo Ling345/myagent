@@ -54,6 +54,9 @@ const els = {
   dataConfirmInput: document.getElementById("data-confirm-input"),
   dataConfirmCancel: document.getElementById("data-confirm-cancel"),
   dataConfirmOk: document.getElementById("data-confirm-ok"),
+  trashHint: document.getElementById("trash-hint"),
+  trashList: document.getElementById("trash-list"),
+  trashEmpty: document.getElementById("trash-empty"),
   uploadButton: document.getElementById("upload-button"),
   uploadInput: document.getElementById("upload-input"),
   uploadChips: document.getElementById("upload-chips"),
@@ -112,6 +115,15 @@ async function postJSON(path, payload) {
   if (!response.ok) {
     // 把服务端写好的中文原因带出来。不这样做的话，用户只看到"服务返回了 400"，
     // 而真正的原因（"请输入你自己的用户名以确认注销"）被丢在半路。
+    throw new Error(data.error || `服务返回了 ${response.status}`);
+  }
+  return data;
+}
+
+async function getJSON(path) {
+  const response = await fetch(path);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
     throw new Error(data.error || `服务返回了 ${response.status}`);
   }
   return data;
@@ -1037,6 +1049,7 @@ function openDataPanel() {
   els.dataConfirm.hidden = true;
   els.dataConfirmInput.value = "";
   els.dataConfirmName.textContent = (state.account && state.account.name) || "";
+  loadTrash();
 }
 
 function exportMyData() {
@@ -1046,15 +1059,132 @@ function exportMyData() {
 }
 
 async function purgeMyCode() {
-  if (!window.confirm("清空代码目录？你上传的文件和智能体生成的文件都会被删掉，会话记录保留。")) {
+  if (
+    !window.confirm(
+      "清空代码目录？文件会先放进回收站（保留一段时间，可以恢复），会话记录不受影响。"
+    )
+  ) {
     return;
   }
   try {
     const payload = await postJSON("/api/account/purge-code", {});
-    els.runStatus.textContent = `已清空代码目录（删了 ${payload.removed} 个文件）。`;
+    els.runStatus.textContent = `已清空代码目录（${payload.removed} 个文件进了回收站）。`;
+    loadTrash();
   } catch (error) {
     els.runStatus.textContent = error.message;
   }
+}
+
+/* ------------------------------------------------------------ 回收站 */
+
+/**
+ * 回收站：删错的东西在这里，能恢复，也能彻底删掉。
+ *
+ * 页面只给两个按钮（恢复 / 彻底删除），不解释内部目录结构——用户不需要知道
+ * 文件躺在哪，只需要知道"还能不能回来"。
+ */
+async function loadTrash() {
+  let payload;
+  try {
+    payload = await getJSON("/api/trash");
+  } catch (error) {
+    els.trashHint.textContent = error.message;
+    return;
+  }
+  const items = [...(payload.sessions || []), ...(payload.code || [])];
+  const totalFiles = items.reduce((sum, item) => sum + (item.files || 0), 0);
+  els.trashHint.textContent = items.length ? `${items.length} 项 · ${totalFiles} 个文件` : "空的";
+  els.trashList.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "trash-empty";
+    empty.textContent = "还没有删掉的东西。";
+    els.trashList.appendChild(empty);
+  } else {
+    for (const item of items) {
+      els.trashList.appendChild(renderTrashItem(item));
+    }
+  }
+  // 面板在侧栏底部，而且高度随回收站内容变化；填完之后再把下沿带进视野，
+  // 否则"滚到位"是照填之前那个矮面板算的，填完就又被顶出屏幕了。
+  if (!els.dataPanel.hidden) {
+    els.dataPanel.scrollIntoView({ block: "end" });
+  }
+}
+
+function renderTrashItem(item) {
+  const row = document.createElement("div");
+  row.className = "trash-item";
+
+  const label = document.createElement("div");
+  label.className = "trash-name";
+  const kind = item.kind === "code" ? "代码目录" : "会话";
+  label.textContent = `${item.name}（${kind}）`;
+  const when = document.createElement("span");
+  when.className = "trash-when";
+  when.textContent = `删除于 ${formatTime(item.deleted_at)}`;
+  label.appendChild(when);
+
+  const actions = document.createElement("div");
+  actions.className = "trash-actions";
+  const restore = document.createElement("button");
+  restore.type = "button";
+  restore.className = "data-button";
+  restore.textContent = "恢复";
+  restore.addEventListener("click", () => restoreTrashItem(item));
+  const purge = document.createElement("button");
+  purge.type = "button";
+  purge.className = "data-button is-danger";
+  purge.textContent = "彻底删除";
+  purge.addEventListener("click", () => purgeTrashItem(item));
+  actions.append(restore, purge);
+
+  row.append(label, actions);
+  return row;
+}
+
+function formatTime(value) {
+  if (!value) return "未知时间";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}
+
+async function restoreTrashItem(item) {
+  try {
+    await postJSON("/api/trash/restore", { kind: item.kind, entry: item.entry });
+    els.runStatus.textContent =
+      item.kind === "code" ? "代码目录已恢复。" : `会话「${item.name}」已恢复。`;
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+    return;
+  }
+  await loadTrash();
+  if (item.kind === "session") await loadSessions();
+}
+
+async function purgeTrashItem(item) {
+  if (!window.confirm(`彻底删除「${item.name}」？这一步没有撤销。`)) return;
+  try {
+    await postJSON("/api/trash/purge", { kind: item.kind, entry: item.entry });
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+    return;
+  }
+  els.runStatus.textContent = "已彻底删除。";
+  loadTrash();
+}
+
+async function emptyMyTrash() {
+  if (!window.confirm("清空回收站？里面的东西就再也找不回来了。")) return;
+  try {
+    await postJSON("/api/trash/empty", {});
+  } catch (error) {
+    els.runStatus.textContent = error.message;
+    return;
+  }
+  els.runStatus.textContent = "回收站已清空。";
+  loadTrash();
 }
 
 async function confirmDeleteAccount() {
@@ -1074,6 +1204,7 @@ els.dataClose.addEventListener("click", () => {
 });
 els.dataExport.addEventListener("click", exportMyData);
 els.dataPurge.addEventListener("click", purgeMyCode);
+els.trashEmpty.addEventListener("click", emptyMyTrash);
 els.dataDelete.addEventListener("click", () => {
   els.dataConfirm.hidden = false;
   els.dataConfirmInput.focus();
