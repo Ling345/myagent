@@ -259,7 +259,15 @@ def housekeeping_once(store: AccountStore, settings: Settings) -> dict[str, obje
     trash_removed = sweep_trash(settings, account_ids, days=int(settings.trash_days))
     audit_removed = AuditLog(store).sweep(settings)
     expiring_notified = Notifier(store, settings).check_expiring()
-    return {"trash": trash_removed, "audit": audit_removed, "notify": expiring_notified}
+    # 对外 API 的任务台账：跑完的留一段时间给调用方取，卡在 running 的标成失败
+    stale_runs = store.mark_stale_api_runs()
+    pruned_runs = store.prune_api_runs(int(settings.api_runs_days))
+    return {
+        "trash": trash_removed,
+        "audit": audit_removed,
+        "notify": expiring_notified,
+        "api_runs": {"stale": stale_runs, "pruned": pruned_runs},
+    }
 
 
 def run_housekeeping_loop(
@@ -273,12 +281,14 @@ def run_housekeeping_loop(
         try:
             report = housekeeping_once(store, settings)
             trash: dict[str, int] = report["trash"]  # type: ignore[assignment]
-            if any(trash.values()) or report["audit"] or report["notify"]:
+            runs: dict[str, int] = report["api_runs"]  # type: ignore[assignment]
+            if any(trash.values()) or report["audit"] or report["notify"] or any(runs.values()):
                 print(
                     "定期清理："
                     f"回收站 {trash['sessions'] + trash['code']} 项、"
                     f"审计日志 {report['audit']} 条、"
-                    f"到期提醒 {report['notify']} 封"
+                    f"到期提醒 {report['notify']} 封、"
+                    f"API 任务 {runs['stale']} 个标失败 / {runs['pruned']} 个清理"
                 )
         except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务带下去
             print(f"定期清理失败（服务继续跑）：{exc}")
