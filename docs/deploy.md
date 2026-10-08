@@ -50,6 +50,10 @@ AGENT_METRICS_TOKEN=
 
 # 可选：自动备份目录（见第 6 节）。留空 = 不自动备份
 AGENT_BACKUP_DIR=/data/backups
+
+# 回收站与审计日志的保留期（见第 6 节末尾）
+AGENT_TRASH_DAYS=30
+AGENT_AUDIT_DAYS=180
 ```
 
 ## 3. 起服务
@@ -183,6 +187,29 @@ AGENT_BACKUP_KEEP=7                     # 只留最近 7 份，且只删自己�
 
 数据库是有版本化的迁移机制的，升级时会自动升到最新版本（只增不改、逐条事务、
 可重复执行）。但**迁移是单向的**——回滚代码不会回滚表结构，所以升级前先备份。
+
+### 删除与留痕
+
+用户在网页上删掉的会话/代码目录先进**回收站**（服务启动时和之后每天清一次，
+保留 `AGENT_TRASH_DAYS` 天，默认 30）。注销账号不进回收站，会把回收站一起删干净。
+
+用户来投诉"我误删了"时，运营方在服务器上查与恢复：
+
+```bash
+docker compose exec app python -m agentcode trash list alice
+docker compose exec app python -m agentcode trash restore alice session 03a1b2c3d4e5-20261008-101500.json
+```
+
+每一步操作都写进库里的 `audit_log`（登录、删除、导出、注销、开户、改套餐……），
+默认保留 `AGENT_AUDIT_DAYS=180` 天：
+
+```bash
+docker compose exec app python -m agentcode audit list --limit 100
+docker compose exec app python -m agentcode audit list --action-prefix login.   # 暴力试探一眼可见
+docker compose exec app python -m agentcode audit list --actor alice --json
+```
+
+审计里**不存密码**，而且写审计失败不会影响用户的操作（只打印警告）。
 
 ## 7. 升级与回滚
 
