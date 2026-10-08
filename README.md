@@ -45,6 +45,9 @@
 > 阶段十二进行中：**出了事找得到人**（账号通知邮箱 + webhook/SMTP 两个渠道，
 > 套餐到期、额度用尽、账号被猜密码、注销完成都会通知本人）。
 > 详见「出了事找得到人：通知」一节。
+>
+> 阶段十三进行中：**对外开放 API**（API 令牌 + `POST /v1/run` / `GET /v1/me`，
+> 让脚本和 CI 也能用，用量记进同一本账）。详见 [`docs/api.md`](docs/api.md)。
 
 内置四种智能体：
 
@@ -869,6 +872,33 @@ D:\Anaconda\python.exe -m agentcode notify test alice  # 真发一封试试渠�
 服务商，这条必须写在政策里）、以及还没做的部分——见
 [`docs/data-and-privacy.md`](docs/data-and-privacy.md)。
 
+### 给程序用的门：对外开放 API
+
+网页是给人用的；脚本、CI、内部工具需要另一扇门。带一把令牌就能调：
+
+```bash
+curl -sS -X POST "$AGENTCODE_URL/v1/run" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "coding", "task": "给 utils.py 补 pytest 测试", "session_id": "ci-42"}'
+```
+
+```json
+{"run_id": "9f2c…", "success": true, "answer": "已生成 tests/test_utils.py，5 项测试全过。",
+ "usage": {"total_tokens": 1834, "prompt_tokens": 1502, "completion_tokens": 332}}
+```
+
+令牌在网页「我的数据」里自己建（运营方也能 `agentcode token create <账号> --name CI`）：
+
+- **只存哈希**，明文只在创建时显示一次；能吊销、能设过期、能按用途建多把；
+- 调用走的是**同一套**配额、并发闸门、单次预算和账本——所以按量计费天然成立；
+- 每次调用都进审计（哪个令牌调了什么），审计里**没有**令牌明文；
+- 后端由服务端决定，调用方不能在请求里挑 `mock` 去拿假答案；
+- 不想对外开放就设 `AGENT_API_ENABLED=false`，`/v1/*` 一律 404。
+
+完整的字段表、错误码、Python / GitHub Actions 示例、以及"现在还没有的"（幂等键、
+异步回调、流式）都写在 **[`docs/api.md`](docs/api.md)** 里。
+
 ## 备份与恢复
 
 用户的数据全在一台机器的一块盘上：账号、账本、订单、会话、代码工作区。
@@ -927,7 +957,7 @@ D:\Anaconda\python.exe -m pytest -q
 之所以要跑 3.10：`pyproject.toml` 里声明了 `requires-python = ">=3.10"`，
 声明了就得有人真的替你测，不然迟早变成一句谎话。
 
-767 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度——连 SMTP 都是用
+812 项用例全部离线运行，不产生任何网络请求，也不消耗 API 额度——连 SMTP 都是用
 本地 stub 服务真的走一遍协议，不往任何真实邮箱发信。覆盖重点：
 
 - 代码执行：stdout/stderr 回传、超时终止、**子进程看不到密钥**、输出截断、路径逃逸被拒；
@@ -953,6 +983,9 @@ D:\Anaconda\python.exe -m pytest -q
   审计记下登录/删除/导出/开户等动作，**密码永远不进审计表**，写审计失败也不影响操作。
 - 通知：邮箱格式与读写、五类事件各自的触发与去重、没配渠道时记台账而不是假装发出、
   渠道失败只记结果不抛异常、SMTP 真投递（本地 stub 验中文主题编码与收件人）。
+- 对外 API：令牌只存哈希、明文只在创建时出现、吊销/过期/停用立刻失效、
+  一个账号的令牌碰不到别人的数据；`POST /v1/run` 走真实运行链路并记账、
+  额度用尽 402、限流 429、服务端决定后端（调用方挑不了 mock）、每次调用进审计。
 
 ## 设计文档与实现计划
 
