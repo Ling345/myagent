@@ -23,6 +23,7 @@ from pathlib import Path
 from agentcode.config import Settings
 from agentcode.accounts import Account, AccountStore
 from agentcode.audit import AuditLog
+from agentcode.notify import Notifier
 from agentcode.trash import TRASH_DIRNAME, code_trash_dir, sweep_trash, trash_name
 
 #: 导出包里的说明文件
@@ -249,15 +250,16 @@ def run_retention_loop(
 
 
 def housekeeping_once(store: AccountStore, settings: Settings) -> dict[str, object]:
-    """做一轮定期清理：回收站（``AGENT_TRASH_DAYS``）+ 审计日志（``AGENT_AUDIT_DAYS``）。
+    """做一轮定期清理与提醒：回收站 + 审计日志 + 套餐到期通知。
 
-    两件事放一起是有原因的：它们都是"过了保留期就该消失"的后台杂活，
+    放一起是有原因的：它们都是"每天看一眼"的后台杂活，
     而且都需要遍历一遍账号，没必要开两个循环、抢两次锁。
     """
     account_ids = [account.id for account in store.list()]
     trash_removed = sweep_trash(settings, account_ids, days=int(settings.trash_days))
     audit_removed = AuditLog(store).sweep(settings)
-    return {"trash": trash_removed, "audit": audit_removed}
+    expiring_notified = Notifier(store, settings).check_expiring()
+    return {"trash": trash_removed, "audit": audit_removed, "notify": expiring_notified}
 
 
 def run_housekeeping_loop(
@@ -271,11 +273,12 @@ def run_housekeeping_loop(
         try:
             report = housekeeping_once(store, settings)
             trash: dict[str, int] = report["trash"]  # type: ignore[assignment]
-            if any(trash.values()) or report["audit"]:
+            if any(trash.values()) or report["audit"] or report["notify"]:
                 print(
                     "定期清理："
                     f"回收站 {trash['sessions'] + trash['code']} 项、"
-                    f"审计日志 {report['audit']} 条"
+                    f"审计日志 {report['audit']} 条、"
+                    f"到期提醒 {report['notify']} 封"
                 )
         except Exception as exc:  # noqa: BLE001 - 后台任务不能把服务带下去
             print(f"定期清理失败（服务继续跑）：{exc}")

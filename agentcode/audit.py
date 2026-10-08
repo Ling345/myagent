@@ -41,6 +41,7 @@ ACCOUNT_ENABLE = "account.enable"
 ACCOUNT_LIMIT = "account.limit"
 ACCOUNT_PASSWD = "account.passwd"
 ACCOUNT_PLAN = "account.plan"
+ACCOUNT_EMAIL = "account.email"
 BILLING_ORDER = "billing.order"
 BILLING_CONFIRM = "billing.confirm"
 #: 运维动作

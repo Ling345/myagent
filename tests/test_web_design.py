@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from agentcode.web.server import STATIC_DIR
 
 
@@ -40,6 +42,19 @@ def test_trash_rows_have_both_actions():
     css = " ".join(_css().split())
     assert ".trash-item" in css
     assert ".trash-actions" in css
+
+
+def test_data_panel_has_a_notification_email_field():
+    """邮箱是"出了事找得到人"的唯一通道，页面上要能自己填。"""
+    html = _html()
+    assert 'id="notify-email"' in html
+    assert 'id="notify-save"' in html
+    js = _js()
+    assert "/api/account/email" in js
+    assert "saveNotifyEmail" in js
+    assert "loadNotifyEmail" in js
+    css = " ".join(_css().split())
+    assert ".notify-row" in css
 
 
 def test_billing_panel_exists_in_markup():
@@ -102,12 +117,16 @@ def test_sidebar_width_is_clamped():
 
 
 def test_billing_panel_is_no_longer_height_capped():
-    """原来写死 58vh，套餐卡片只能挤在一条窄缝里。"""
+    """原来写死 58vh，套餐卡片只能挤在一条窄缝里。
+
+    这里**不钉死具体倍数**：面板内容会随功能增加（回收站、通知邮箱……），
+    70vh 改到 80vh 是为了别出现内部滚动条。要守的是"按视口封顶 + 不参与收缩"。
+    """
     css = " ".join(_css().split())
     assert "max-height: 58vh" not in css
     # 关键：面板不参与收缩，否则会被会话列表挤成一条缝（实测只剩 30px 高）
     assert "flex: 0 0 auto" in css
-    assert "max-height: 70vh" in css
+    assert re.search(r"max-height:\s*\d+vh", css)
 
 
 def test_resizer_is_hidden_on_narrow_screens():
