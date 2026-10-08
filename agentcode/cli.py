@@ -260,6 +260,20 @@ def build_parser() -> argparse.ArgumentParser:
     notify_test.add_argument("account", help="账号名")
     _add_data_path_arguments(notify_test)
 
+    token_parser = subparsers.add_parser("token", help="API 令牌：给脚本和 CI 用")
+    token_sub = token_parser.add_subparsers(dest="token_command", required=True)
+    token_create = token_sub.add_parser("create", help="给某个账号建一把令牌（明文只显示一次）")
+    token_create.add_argument("account", help="账号名")
+    token_create.add_argument("--name", default="", help="给这把令牌起个名字，比如 CI")
+    token_create.add_argument("--days", type=int, default=None, help="多少天后过期；不填＝不过期")
+    _add_data_path_arguments(token_create)
+    token_list = token_sub.add_parser("list", help="列出某个账号的令牌")
+    token_list.add_argument("account", help="账号名")
+    token_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    token_revoke = token_sub.add_parser("revoke", help="吊销一把令牌")
+    token_revoke.add_argument("account", help="账号名")
+    token_revoke.add_argument("token_id", help="令牌 id（用 token list 查）")
+
     trash_parser = subparsers.add_parser("trash", help="回收站：误删的东西在这里")
     trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
     trash_list = trash_sub.add_parser("list", help="看某个账号的回收站")
@@ -610,6 +624,72 @@ def _notify_command(args: argparse.Namespace) -> int:
         note = f"：{item['error']}" if item["error"] else ""
         print(f"  {item['at']}  {who:<10} {item['event']:<26} {mark}{note}")
     print("  提示：agentcode notify test <账号> 可以真发一封试试渠道通不通。")
+    return 0
+
+
+def _token_command(args: argparse.Namespace) -> int:
+    """API 令牌的运营侧管理。
+
+    用户自己在网页上也能建；这里给运营方用——比如用户说"我想接 CI"，
+    客服能当场建一把、把明文念给他（**明文只出现这一次**）。
+    """
+    from agentcode import audit as AUDIT
+    from agentcode.accounts import AccountStore
+    from agentcode.audit import AuditLog
+    from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.tokens import ApiTokenService
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    service = ApiTokenService(store)
+    account = store.get(args.account)
+    if account is None:
+        print(f"错误：没有这个账号：{args.account}")
+        return 2
+    log = AuditLog(store)
+
+    if args.token_command == "create":
+        record, plaintext = service.create(account, name=args.name, expires_days=args.days)
+        log.record(
+            AUDIT.API_TOKEN_CREATE,
+            actor_name="命令行",
+            target=str(record["name"]),
+            detail={"account": account.name, "prefix": record["prefix"]},
+        )
+        print(f"已为 {account.name} 创建令牌「{record['name']}」")
+        print(_THIN_SEPARATOR)
+        print(plaintext)
+        print(_THIN_SEPARATOR)
+        print("这串令牌**只显示这一次**，请立刻复制保存；丢了只能吊销后重建。")
+        if record["expires_at"]:
+            print(f"到期时间：{record['expires_at']}")
+        print(f"用法：curl -X POST <服务地址>/v1/run -H \"Authorization: Bearer {plaintext[:12]}…\" …")
+        return 0
+
+    if args.token_command == "revoke":
+        revoked = service.revoke(account.id, args.token_id)
+        log.record(
+            AUDIT.API_TOKEN_REVOKE,
+            actor_name="命令行",
+            target=args.token_id,
+            result="ok" if revoked else "not_found",
+            detail={"account": account.name},
+        )
+        print("已吊销。" if revoked else "没有找到这把令牌（或者它已经吊销过了）。")
+        return 0 if revoked else 1
+
+    tokens = service.list(account.id)
+    if args.json:
+        print(json.dumps({"tokens": tokens}, ensure_ascii=False))
+        return 0
+    if not tokens:
+        print(f"{account.name} 还没有 API 令牌。用 agentcode token create {account.name} 建一把。")
+        return 0
+    print(f"{account.name} 的令牌：")
+    for item in tokens:
+        state = "已吊销" if not item["is_active"] else ("已过期" if item["expired"] else "有效")
+        used = item["last_used_at"] or "从未使用"
+        expires = item["expires_at"] or "不过期"
+        print(f"  {item['id']}  {item['name']:<12} {item['prefix']}…  {state}  最近使用 {used}  到期 {expires}")
     return 0
 
 
@@ -1404,6 +1484,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "notify":
             return _notify_command(args)
+
+        if args.command == "token":
+            return _token_command(args)
 
         if args.command == "test-gen":
             return _testgen_command(args)

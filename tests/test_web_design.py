@@ -57,6 +57,30 @@ def test_data_panel_has_a_notification_email_field():
     assert ".notify-row" in css
 
 
+def test_data_panel_has_api_token_management():
+    """令牌要在页面上能建、能看到、能吊销——否则用户只能来求运营方。
+
+    单独一个面板：一开始塞进「我的数据」，实测内容超一屏、令牌那块被挤到
+    可视区外面去了。
+    """
+    html = _html()
+    assert 'id="token-toggle"' in html
+    assert 'id="token-panel"' in html
+    assert 'id="token-close"' in html
+    assert 'id="token-name"' in html
+    assert 'id="token-create"' in html
+    assert 'id="token-fresh"' in html
+    assert 'id="token-list"' in html
+    js = _js()
+    assert "/api/tokens/create" in js
+    assert "/api/tokens/revoke" in js
+    assert "showFreshToken" in js
+    # 明文只显示一次这件事必须写在页面上
+    assert "只显示这一次" in html
+    css = " ".join(_css().split())
+    assert ".token-item" in css
+
+
 def test_billing_panel_exists_in_markup():
     html = _html()
     assert 'id="billing-panel"' in html
