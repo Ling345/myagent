@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -36,6 +37,23 @@ DEFAULT_DB_PATH = "traces/agentcode.db"
 DEFAULT_DAILY_TOKEN_LIMIT = 50_000
 PBKDF2_ITERATIONS = 200_000
 MIN_PASSWORD_LENGTH = 6
+#: 邮箱：只做"看得出是人写的"这一层校验（真正的可达性只能靠发信验证）
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+MAX_EMAIL_LENGTH = 254
+
+
+def normalize_email(value: str | None) -> str:
+    """把邮箱收成小写并做格式校验；空串表示**清空**（返回 ``""``）。
+
+    刻意不做"点链接验证"：没有域名和稳定发信能力时，验证链接只会造出一堆
+    点不开的信。这里是防手滑，不是防伪造——那件事得等真发得出信再说。
+    """
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > MAX_EMAIL_LENGTH or not EMAIL_PATTERN.match(cleaned):
+        raise AgentCodeError(f"邮箱格式不对：{cleaned}。")
+    return cleaned.lower()
 
 
 def hash_password(password: str, *, iterations: int = PBKDF2_ITERATIONS) -> str:
@@ -82,6 +100,8 @@ class Account:
     plan_expires_at: str | None = None
     #: 账号级额度覆盖；为空则跟随套餐
     limit_override: int | None = None
+    #: 接收服务通知的邮箱；没填就没有通知通道
+    email: str | None = None
 
 
 class AccountStore:
@@ -114,6 +134,7 @@ class AccountStore:
         *,
         plan: str = "free",
         daily_token_limit: int | None = None,
+        email: str | None = None,
     ) -> Account:
         """新建账号；名称重复时报错。"""
         cleaned = " ".join(str(name or "").split())
@@ -124,6 +145,7 @@ class AccountStore:
 
         resolved = get_plan(plan)
         override = int(daily_token_limit) if daily_token_limit is not None else None
+        address = normalize_email(email) or None
         account = Account(
             id=uuid.uuid4().hex[:12],
             name=cleaned,
@@ -133,12 +155,14 @@ class AccountStore:
             daily_token_limit=override if override is not None else resolved.daily_tokens,
             created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             limit_override=override,
+            email=address,
         )
         try:
             with self._lock, self._conn:
                 self._conn.execute(
                     "INSERT INTO accounts (id, name, password_hash, plan, daily_token_limit,"
-                    " is_active, created_at, limit_override) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    " is_active, created_at, limit_override, email)"
+                    " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (
                         account.id,
                         account.name,
@@ -147,6 +171,7 @@ class AccountStore:
                         account.daily_token_limit,
                         account.created_at,
                         account.limit_override,
+                        account.email,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -168,6 +193,7 @@ class AccountStore:
             plan_started_at=row["plan_started_at"],
             plan_expires_at=row["plan_expires_at"],
             limit_override=None if override is None else int(override),
+            email=row["email"],
         )
 
     def get(self, name: str) -> Account | None:
@@ -217,6 +243,16 @@ class AccountStore:
             cursor = self._conn.execute(
                 "UPDATE accounts SET password_hash = ? WHERE name = ?",
                 (hashed, str(name or "").strip()),
+            )
+        return cursor.rowcount > 0
+
+    def set_email(self, name: str, email: str | None) -> bool:
+        """设置或清空账号的接收邮箱（空串 = 清空）。"""
+        address = normalize_email(email) or None
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE accounts SET email = ? WHERE name = ?",
+                (address, str(name or "").strip()),
             )
         return cursor.rowcount > 0
 
@@ -534,6 +570,118 @@ class AccountStore:
         with self._lock, self._conn:
             cursor = self._conn.execute("DELETE FROM audit_log WHERE at < ?", (stamp,))
         return int(cursor.rowcount or 0)
+
+    # ------------------------------------------------------------------ 通知
+
+    #: 通知表的列，顺序与 INSERT 一致
+    NOTIFICATION_FIELDS = (
+        "created_at",
+        "account_id",
+        "account_name",
+        "email",
+        "event",
+        "dedupe_key",
+        "subject",
+        "body",
+        "channel",
+        "status",
+        "error",
+    )
+
+    def record_notification(
+        self,
+        *,
+        event: str,
+        status: str,
+        account_id: str = "",
+        account_name: str = "",
+        email: str = "",
+        dedupe_key: str | None = None,
+        subject: str = "",
+        body: str = "",
+        channel: str = "",
+        error: str = "",
+        at: str | None = None,
+    ) -> dict[str, object]:
+        """记一条通知的去向：发出去了、失败了、还是（没配渠道）先存着。"""
+        created = at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO notifications (created_at, account_id, account_name, email,"
+                " event, dedupe_key, subject, body, channel, status, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    created,
+                    account_id or None,
+                    account_name or None,
+                    email or None,
+                    str(event),
+                    dedupe_key,
+                    subject,
+                    body,
+                    channel or None,
+                    str(status),
+                    error or None,
+                ),
+            )
+        return {"created_at": created, "event": event, "status": status}
+
+    def notifications(
+        self, *, limit: int = 50, account_id: str | None = None, status: str | None = None
+    ) -> list[dict[str, object]]:
+        """最近的通知记录，新的在前。"""
+        clauses: list[str] = []
+        params: list[object] = []
+        if account_id:
+            clauses.append("account_id = ?")
+            params.append(str(account_id))
+        if status:
+            clauses.append("status = ?")
+            params.append(str(status))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM notifications{where} ORDER BY id DESC LIMIT ?", tuple(params)
+            ).fetchall()
+        return [
+            {
+                "at": row["created_at"],
+                "account_id": row["account_id"] or "",
+                "account_name": row["account_name"] or "",
+                "email": row["email"] or "",
+                "event": row["event"],
+                "status": row["status"],
+                "channel": row["channel"] or "",
+                "subject": row["subject"] or "",
+                "error": row["error"] or "",
+            }
+            for row in rows
+        ]
+
+    def notification_taken(self, account_id: str, event: str, dedupe_key: str | None) -> bool:
+        """这条通知是不是已经处理过了（发成功，或先记下来等渠道）。
+
+        **失败不算处理过**：下一次有机会还要再试一次，不能因为服务端抖了一下
+        就让用户永远收不到。
+        """
+        if not dedupe_key:
+            return False
+        with self._lock:
+            if account_id:
+                row = self._conn.execute(
+                    "SELECT 1 FROM notifications WHERE account_id = ? AND event = ?"
+                    " AND dedupe_key = ? AND status IN ('sent', 'queued') LIMIT 1",
+                    (str(account_id), str(event), str(dedupe_key)),
+                ).fetchone()
+            else:
+                # 免登录模式没有账号，写进去的是 NULL
+                row = self._conn.execute(
+                    "SELECT 1 FROM notifications WHERE account_id IS NULL AND event = ?"
+                    " AND dedupe_key = ? AND status IN ('sent', 'queued') LIMIT 1",
+                    (str(event), str(dedupe_key)),
+                ).fetchone()
+        return row is not None
 
     # ------------------------------------------------------------------ 订单
 

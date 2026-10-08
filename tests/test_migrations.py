@@ -245,3 +245,46 @@ def test_v4_is_idempotent(tmp_path):
     first = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
     run_migrations(conn)
     assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == first
+
+
+# ---------------------------------------------------------------- v5：邮箱与通知
+
+
+def test_v5_adds_the_email_column_and_the_notifications_table(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+    assert "email" in columns
+    assert "notifications" in _tables(conn)
+    notification_columns = {row[1] for row in conn.execute("PRAGMA table_info(notifications)")}
+    assert {
+        "created_at",
+        "account_id",
+        "email",
+        "event",
+        "dedupe_key",
+        "status",
+        "error",
+    } <= notification_columns
+
+
+def test_v5_upgrades_an_old_database_without_losing_the_rest(tmp_path):
+    """v1 老库 + 真实账号升到 v5：账号还在、能填邮箱、能记通知。"""
+    conn = _connect(tmp_path)
+    _make_legacy_database(conn)
+    conn.execute(
+        "INSERT INTO accounts (id, name, password_hash, plan, daily_token_limit, is_active,"
+        " created_at) VALUES ('a1', 'alice', 'hash', 'free', 50000, 1, '2026-09-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    version = run_migrations(conn)
+
+    assert version >= 5
+    conn.execute("UPDATE accounts SET email = 'alice@example.com' WHERE name = 'alice'")
+    assert (
+        conn.execute("SELECT email FROM accounts WHERE name = 'alice'").fetchone()[0]
+        == "alice@example.com"
+    )
+    assert conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 0

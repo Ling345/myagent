@@ -200,12 +200,51 @@ def _v4_audit_log(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, at DESC)")
 
 
+def _v5_email_and_notifications(conn: sqlite3.Connection) -> None:
+    """账号邮箱 + 通知台账。
+
+    邮箱是"出了事找得到人"的唯一通道（数据泄露、服务变更、套餐到期）；
+    通知台账记的是"发过什么、发成功没有"——没配渠道也不许静默丢，
+    否则你以为通知过用户，其实没有。
+    """
+    add_column(conn, "accounts", "email", "TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            account_id TEXT,
+            account_name TEXT,
+            email TEXT,
+            event TEXT NOT NULL,
+            dedupe_key TEXT,
+            subject TEXT,
+            body TEXT,
+            channel TEXT,
+            status TEXT NOT NULL,
+            error TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_account"
+        " ON notifications(account_id, id DESC)"
+    )
+    # 去重查询走的是 (account_id, event, dedupe_key, status)，不建唯一索引：
+    # 发送**失败**的那条不能挡住重试，这个判断交给代码做
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_dedupe"
+        " ON notifications(account_id, event, dedupe_key, status)"
+    )
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
     Migration(2, "套餐字段、用量账本与订单", _v2_billing),
     Migration(3, "用量账本分开记输入/输出 token", _v3_usage_split),
     Migration(4, "操作审计日志", _v4_audit_log),
+    Migration(5, "账号邮箱与通知台账", _v5_email_and_notifications),
 ]
 
 
