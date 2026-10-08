@@ -54,6 +54,15 @@ AGENT_BACKUP_DIR=/data/backups
 # 回收站与审计日志的保留期（见第 6 节末尾）
 AGENT_TRASH_DAYS=30
 AGENT_AUDIT_DAYS=180
+
+# 服务通知（发给用户本人：套餐到期、额度用尽、账号被猜密码、注销完成）
+# 渠道二选一：webhook 优先，其次 SMTP；都没配就只记台账，不会假装发出去
+# AGENT_NOTIFY_WEBHOOK=
+AGENT_SMTP_HOST=
+AGENT_SMTP_PORT=465
+AGENT_SMTP_USER=
+AGENT_SMTP_PASSWORD=
+AGENT_SMTP_FROM=
 ```
 
 ## 3. 起服务
@@ -210,6 +219,28 @@ docker compose exec app python -m agentcode audit list --actor alice --json
 ```
 
 审计里**不存密码**，而且写审计失败不会影响用户的操作（只打印警告）。
+
+### 通知用户的通道（部署后请试一次）
+
+用户可以在网页「我的数据」里填接收通知的邮箱；运营方也能补录：
+
+```bash
+docker compose exec app python -m agentcode user email alice --set alice@example.com
+```
+
+填了之后，套餐到期、当天额度用尽、账号被连续猜密码、注销完成会通知本人。
+渠道在 `deploy/.env` 里二选一：`AGENT_NOTIFY_WEBHOOK`（POST 一段 JSON，最省事）
+或 SMTP（`AGENT_SMTP_HOST` 等，465 走隐式 TLS、其它端口走 STARTTLS）。
+
+**配完务必试一发**，别等真出事才发现发不出去：
+
+```bash
+docker compose exec app python -m agentcode notify test alice
+docker compose exec app python -m agentcode notify list     # 台账：发成功 / 未发（没配渠道）/ 失败
+```
+
+没配渠道时通知会被记成 `queued` 并打日志，**不会**显示"已发送"——
+这条是刻意的：假的成功比不发更糟。
 
 ## 7. 升级与回滚
 
