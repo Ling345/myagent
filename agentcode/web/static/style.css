@@ -1078,6 +1078,78 @@ button:disabled {
   text-align: center;
 }
 
+.tokens {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.token-fresh {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.token-fresh code {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.token-fresh .data-button {
+  width: auto;
+  padding: 4px 8px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+.token-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.token-item.is-off {
+  opacity: 0.55;
+}
+
+.token-item .data-button {
+  width: auto;
+  align-self: flex-end;
+  padding: 4px 8px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.tokens code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-strong);
+  font-size: 11px;
+}
+
 .trash-head {
   display: flex;
   align-items: baseline;
