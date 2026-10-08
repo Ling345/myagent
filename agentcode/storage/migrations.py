@@ -265,6 +265,44 @@ def _v6_api_tokens(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v7_api_runs(conn: sqlite3.Connection) -> None:
+    """对外 API 的任务台账：异步任务的状态与结果、以及幂等键。
+
+    为什么要落库而不是放内存：调用方拿到 ``run_id`` 之后，**服务重启一次
+    任务就人间蒸发**，那异步等于没做。落库之后"跑完的结果"能等到重启之后
+    再取；幂等键同理——客户端超时重发时，得能认出"同一单"。
+
+    ``idempotency_key`` 上建**部分唯一索引**（只对非空生效）：同一个账号
+    同一个键只能有一单，否则重发就会扣两次钱。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_runs (
+            run_id TEXT PRIMARY KEY,
+            account_id TEXT,
+            token_id TEXT,
+            agent TEXT NOT NULL,
+            task TEXT NOT NULL,
+            session_id TEXT,
+            status TEXT NOT NULL,
+            request_key TEXT,
+            result TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            finished_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_runs_account"
+        " ON api_runs(account_id, created_at DESC)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_runs_request_key"
+        " ON api_runs(account_id, request_key) WHERE request_key IS NOT NULL"
+    )
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
@@ -273,6 +311,7 @@ MIGRATIONS: list[Migration] = [
     Migration(4, "操作审计日志", _v4_audit_log),
     Migration(5, "账号邮箱与通知台账", _v5_email_and_notifications),
     Migration(6, "API 令牌", _v6_api_tokens),
+    Migration(7, "对外 API 的任务台账与幂等键", _v7_api_runs),
 ]
 
 
