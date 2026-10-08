@@ -62,6 +62,16 @@ def _add_web_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=None, help="JSON 配置文件路径")
 
 
+def _add_data_path_arguments(parser: argparse.ArgumentParser) -> None:
+    """给"只读数据目录"的子命令加参数（审计、回收站用）。
+
+    这些命令不碰模型，所以只给 .env / JSON 配置的入口——
+    密钥没配也照样能用，那正是库出问题时最需要它们的时候。
+    """
+    parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    parser.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构造命令行解析器。"""
     parser = argparse.ArgumentParser(
@@ -218,6 +228,41 @@ def build_parser() -> argparse.ArgumentParser:
     backup_list = backup_sub.add_parser("list", help="列出某个目录里的备份")
     backup_list.add_argument("--dir", default=None, help="备份目录，默认 backups")
 
+    audit_parser = subparsers.add_parser("audit", help="操作审计：谁在什么时候做了什么")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command", required=True)
+    audit_list = audit_sub.add_parser("list", help="列最近的审计记录")
+    audit_list.add_argument("--limit", type=int, default=50, help="看多少条，默认 50")
+    audit_list.add_argument("--actor", default=None, help="只看某个账号")
+    audit_list.add_argument("--action", default=None, help="只看某个动作，如 session.delete")
+    audit_list.add_argument(
+        "--action-prefix", dest="action_prefix", default=None, help="按动作前缀筛，如 login."
+    )
+    audit_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    audit_prune = audit_sub.add_parser("prune", help="删掉太老的审计记录")
+    audit_prune.add_argument("--days", type=int, default=None, help="默认用 AGENT_AUDIT_DAYS")
+    audit_prune.add_argument("--env-file", default=None, help="指定 .env 文件路径")
+    audit_prune.add_argument("--config", default=None, help="JSON 配置文件路径")
+
+    trash_parser = subparsers.add_parser("trash", help="回收站：误删的东西在这里")
+    trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
+    trash_list = trash_sub.add_parser("list", help="看某个账号的回收站")
+    trash_list.add_argument("account", help="账号名")
+    trash_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    _add_data_path_arguments(trash_list)
+    trash_restore = trash_sub.add_parser("restore", help="把一条放回去")
+    trash_restore.add_argument("account", help="账号名")
+    trash_restore.add_argument("kind", choices=["session", "code"], help="session=会话，code=代码目录")
+    trash_restore.add_argument("entry", help="条目名（用 trash list 查）")
+    _add_data_path_arguments(trash_restore)
+    trash_purge = trash_sub.add_parser("purge", help="彻底删掉一条；不给条目就清空整个回收站")
+    trash_purge.add_argument("account", help="账号名")
+    trash_purge.add_argument(
+        "kind", nargs="?", choices=["session", "code"], help="不给就清空整个回收站"
+    )
+    trash_purge.add_argument("entry", nargs="?", help="条目名")
+    trash_purge.add_argument("--yes", action="store_true", help="清空时不问一遍")
+    _add_data_path_arguments(trash_purge)
+
     list_parser = subparsers.add_parser("list", help="列出已注册的智能体与工具")
     list_parser.add_argument("--env-file", default=None, help="指定 .env 文件路径")
     list_parser.add_argument("--config", default=None, help="JSON 配置文件路径")
@@ -373,6 +418,122 @@ def render_result(result: AgentResult) -> str:
     return "\n".join(lines)
 
 
+def _audit_command(args: argparse.Namespace) -> int:
+    """看审计日志、清过期记录。
+
+    **只在命令行**：这是运营数据，网页上不给用户看别人（以及自己）的每一步操作。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.audit import AuditLog
+    from agentcode.config import DEFAULT_DB_PATH
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    log = AuditLog(store)
+
+    if args.audit_command == "prune":
+        days = args.days if args.days is not None else int(_load_settings(args).audit_days)
+        if days <= 0:
+            print("没删：保留天数 ≤ 0 表示永久保留；要删就给个天数（--days 30）。")
+            return 0
+        print(f"已删掉 {store.prune_audit(days)} 条超过 {days} 天的审计记录。")
+        return 0
+
+    entries = log.recent(
+        limit=args.limit,
+        actor_name=args.actor,
+        action=args.action,
+        action_prefix=args.action_prefix,
+    )
+    if args.json:
+        print(json.dumps({"entries": entries}, ensure_ascii=False))
+        return 0
+    if not entries:
+        print("（没有符合条件的记录）")
+        return 0
+    print(f"最近 {len(entries)} 条（新的在上面）：")
+    for item in entries:
+        who = str(item["actor_name"] or "（匿名）")
+        target = str(item["target"] or "-")
+        mark = "" if item["result"] == "ok" else f"  [{item['result']}]"
+        detail = item["detail"]
+        tail = f"  {json.dumps(detail, ensure_ascii=False)}" if detail else ""
+        print(f"  {item['at']}  {who:<12} {str(item['action']):<18} {target}{mark}{tail}")
+    return 0
+
+
+def _trash_command(args: argparse.Namespace) -> int:
+    """回收站：看、恢复、彻底删。
+
+    主要给运营方用——用户投诉"我误删了"，客服得能立刻查、立刻恢复。
+    """
+    from agentcode.accounts import AccountStore
+    from agentcode.config import DEFAULT_DB_PATH
+    from agentcode.trash import (
+        TrashError,
+        account_trash,
+        empty_trash,
+        purge_entry,
+        restore_entry,
+    )
+
+    store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    account = store.get(args.account)
+    if account is None:
+        print(f"错误：没有这个账号：{args.account}")
+        return 2
+    settings = _load_settings(args)
+
+    if args.trash_command == "list":
+        trash = account_trash(settings, account.id)
+        if args.json:
+            print(
+                json.dumps(
+                    {kind: [item.to_dict() for item in items] for kind, items in trash.items()},
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        if not trash["sessions"] and not trash["code"]:
+            print(f"{account.name} 的回收站是空的。")
+            return 0
+        for kind, items in trash.items():
+            for item in items:
+                print(
+                    f"  [{kind}] {item.entry}  {item.name}"
+                    f"（{item.files} 个文件，删于 {item.deleted_at}）"
+                )
+        return 0
+
+    try:
+        if args.trash_command == "restore":
+            report = restore_entry(settings, account.id, args.kind, args.entry)
+            print(f"已恢复：{report['path']}")
+            return 0
+
+        if args.kind and args.entry:
+            removed = purge_entry(settings, account.id, args.kind, args.entry)
+            print("已彻底删除。" if removed else "没有找到这一条。")
+            return 0 if removed else 1
+        if args.kind and not args.entry:
+            print("错误：只给了类型没给条目。给个条目名，或者两个都不给来清空回收站。")
+            return 2
+        if not args.yes:
+            try:
+                answer = input(f"清空 {account.name} 的回收站？里面的东西再也找不回来，输入 yes 继续：")
+            except EOFError:
+                print("读不到确认输入（非交互环境）；确定要清空请加 --yes。")
+                return 1
+            if answer.strip().lower() not in {"yes", "y"}:
+                print("已取消，什么都没改。")
+                return 1
+        removed = empty_trash(settings, account.id)
+        print(f"已清空：会话 {removed['sessions']} 项、代码目录 {removed['code']} 项。")
+        return 0
+    except TrashError as exc:
+        print(f"错误：{exc}")
+        return 1
+
+
 def _run_command(args: argparse.Namespace) -> int:
     """执行 run 子命令。"""
     settings = _load_settings(args)
@@ -449,17 +610,31 @@ def _run_command(args: argparse.Namespace) -> int:
 
 
 def _user_command(args: argparse.Namespace) -> int:
-    """执行 user 子命令：开户、停用、调额度、看用量。"""
+    """执行 user 子命令：开户、停用、调额度、看用量。
+
+    每个**改动**都写一条审计：用户来问"我的账号怎么被停了"，得答得出来。
+    """
     from agentcode.accounts import AccountStore
+    from agentcode import audit as AUDIT
+    from agentcode.audit import AuditLog
     from agentcode.config import DEFAULT_DB_PATH
 
     store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
+    log = AuditLog(store)
+    # 命令行没有登录态，用这个名字标明"这是运维/本机操作"
+    OPERATOR = "命令行"
     command = args.user_command
 
     if command == "add":
         password = args.password or secrets.token_urlsafe(9)
         account = store.create(
             args.name, password, plan=args.plan, daily_token_limit=args.daily_limit
+        )
+        log.record(
+            AUDIT.ACCOUNT_CREATE,
+            actor_name=OPERATOR,
+            target=account.name,
+            detail={"plan": account.plan, "daily_limit": account.daily_token_limit},
         )
         print(
             f"已创建账号：{account.name}（套餐 {account.plan}，每日 {account.daily_token_limit} token）"
@@ -484,17 +659,37 @@ def _user_command(args: argparse.Namespace) -> int:
 
     if command in ("disable", "enable"):
         changed = store.set_active(args.name, command == "enable")
+        log.record(
+            AUDIT.ACCOUNT_ENABLE if command == "enable" else AUDIT.ACCOUNT_DISABLE,
+            actor_name=OPERATOR,
+            target=args.name,
+            result="ok" if changed else "not_found",
+        )
         print("已更新。" if changed else f"账号「{args.name}」不存在。")
         return 0 if changed else 1
 
     if command == "limit":
         changed = store.set_limit(args.name, args.tokens)
+        log.record(
+            AUDIT.ACCOUNT_LIMIT,
+            actor_name=OPERATOR,
+            target=args.name,
+            result="ok" if changed else "not_found",
+            detail={"tokens": args.tokens},
+        )
         print("已更新。" if changed else f"账号「{args.name}」不存在。")
         return 0 if changed else 1
 
     if command == "passwd":
         password = args.password or secrets.token_urlsafe(9)
         changed = store.set_password(args.name, password)
+        # 只记"改了哪个账号的密码"，密码本身绝不进审计
+        log.record(
+            AUDIT.ACCOUNT_PASSWD,
+            actor_name=OPERATOR,
+            target=args.name,
+            result="ok" if changed else "not_found",
+        )
         print("已更新密码。" if changed else f"账号「{args.name}」不存在。")
         if changed and not args.password:
             print(f"新密码：{password}（只显示这一次）")
@@ -513,6 +708,16 @@ def _user_command(args: argparse.Namespace) -> int:
         except AgentCodeError as exc:
             print(f"错误：{exc}")
             return 2
+        log.record(
+            AUDIT.ACCOUNT_PLAN,
+            actor_name=OPERATOR,
+            target=refreshed.name,
+            detail={
+                "plan": refreshed.plan,
+                "months": args.months,
+                "expires_at": refreshed.plan_expires_at,
+            },
+        )
         expires = refreshed.plan_expires_at or "不过期"
         print(f"已把 {refreshed.name} 设为套餐 {refreshed.plan}，到期时间：{expires}")
         return 0
@@ -542,6 +747,8 @@ def _billing_command(args: argparse.Namespace) -> int:
     自助提权的路。
     """
     from agentcode.accounts import AccountStore
+    from agentcode import audit as AUDIT
+    from agentcode.audit import AuditLog
     from agentcode.billing import BillingService
     from agentcode.config import DEFAULT_DB_PATH
     from agentcode.core.errors import AgentCodeError
@@ -551,6 +758,8 @@ def _billing_command(args: argparse.Namespace) -> int:
 
     store = AccountStore(os.environ.get("AGENT_DB_PATH") or DEFAULT_DB_PATH)
     billing = BillingService(store)
+    log = AuditLog(store)
+    OPERATOR = "命令行"
     command = args.billing_command
 
     if command == "orders":
@@ -579,6 +788,12 @@ def _billing_command(args: argparse.Namespace) -> int:
         except AgentCodeError as exc:
             print(f"错误：{exc}")
             return 2
+        log.record(
+            AUDIT.ACCOUNT_PLAN,
+            actor_name=OPERATOR,
+            target=refreshed.name,
+            detail={"plan": refreshed.plan, "months": args.months, "source": "grant"},
+        )
         expires = refreshed.plan_expires_at or "不过期"
         print(f"已把 {refreshed.name} 设为套餐 {refreshed.plan}，到期时间：{expires}")
         return 0
@@ -589,6 +804,12 @@ def _billing_command(args: argparse.Namespace) -> int:
         except AgentCodeError as exc:
             print(f"错误：{exc}")
             return 2
+        log.record(
+            AUDIT.BILLING_CONFIRM,
+            actor_name=OPERATOR,
+            target=order.id,
+            detail={"plan": order.plan, "amount_cents": order.amount_cents},
+        )
         print(f"订单 {order.id} 已确认到账，套餐 {order.plan} 生效 {order.months} 个月。")
         return 0
 
@@ -1071,6 +1292,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "backup":
             return _backup_command(args)
+
+        if args.command == "audit":
+            return _audit_command(args)
+
+        if args.command == "trash":
+            return _trash_command(args)
 
         if args.command == "test-gen":
             return _testgen_command(args)
