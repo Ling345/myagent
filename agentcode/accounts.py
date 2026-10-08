@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from agentcode.core.errors import AgentCodeError
 from agentcode.plans import UNLIMITED, Plan, effective_plan, get_plan, is_expired
@@ -435,6 +437,103 @@ class AccountStore:
                 "DELETE FROM usage_ledger WHERE account_id = ? AND day = ?",
                 (account_id, day or _today()),
             )
+
+    # ------------------------------------------------------------------ 审计
+
+    def record_audit(
+        self,
+        action: str,
+        *,
+        actor_id: str = "",
+        actor_name: str = "",
+        target: str = "",
+        result: str = "ok",
+        detail: Any = None,
+        ip: str = "",
+        at: str | None = None,
+    ) -> None:
+        """往审计表里写一条。
+
+        ``detail`` 走 JSON 存，方便事后看"到底改了什么"；**调用方负责别把密码
+        放进来**（:mod:`agentcode.audit` 的门面还会再抹一遍）。
+        """
+        payload = None if detail is None else json.dumps(detail, ensure_ascii=False, default=str)
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO audit_log"
+                " (at, actor_id, actor_name, action, target, result, detail, ip)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    actor_id or None,
+                    actor_name or None,
+                    str(action),
+                    target or None,
+                    str(result),
+                    payload,
+                    ip or None,
+                ),
+            )
+
+    @staticmethod
+    def _row_to_audit(row: sqlite3.Row) -> dict[str, object]:
+        try:
+            detail = json.loads(row["detail"]) if row["detail"] else None
+        except json.JSONDecodeError:
+            detail = row["detail"]  # 老数据坏掉也不能让"查日志"整个失败
+        return {
+            "at": row["at"],
+            "actor_id": row["actor_id"] or "",
+            "actor_name": row["actor_name"] or "",
+            "action": row["action"],
+            "target": row["target"] or "",
+            "result": row["result"],
+            "detail": detail,
+            "ip": row["ip"] or "",
+        }
+
+    def audit_entries(
+        self,
+        *,
+        limit: int = 50,
+        actor_name: str | None = None,
+        action: str | None = None,
+        action_prefix: str | None = None,
+    ) -> list[dict[str, object]]:
+        """最近的审计记录，新的在前。"""
+        clauses: list[str] = []
+        params: list[object] = []
+        if actor_name:
+            clauses.append("actor_name = ?")
+            params.append(str(actor_name))
+        if action:
+            clauses.append("action = ?")
+            params.append(str(action))
+        if action_prefix:
+            clauses.append("action LIKE ?")
+            params.append(f"{str(action_prefix)}%")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, int(limit)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ?", tuple(params)
+            ).fetchall()
+        return [self._row_to_audit(row) for row in rows]
+
+    def audit_count(self) -> int:
+        """审计表里一共有多少条。"""
+        with self._lock:
+            return int(self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0])
+
+    def prune_audit(self, days: int, *, now: datetime | None = None) -> int:
+        """删掉超过 ``days`` 天的审计记录；``days <= 0`` 表示**永久保留**。"""
+        if days <= 0:
+            return 0
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=int(days))
+        stamp = cutoff.isoformat(timespec="seconds")
+        with self._lock, self._conn:
+            cursor = self._conn.execute("DELETE FROM audit_log WHERE at < ?", (stamp,))
+        return int(cursor.rowcount or 0)
 
     # ------------------------------------------------------------------ 订单
 

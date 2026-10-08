@@ -173,11 +173,39 @@ def _v3_usage_split(conn: sqlite3.Connection) -> None:
     add_column(conn, "usage_ledger", "completion_tokens", "INTEGER")
 
 
+def _v4_audit_log(conn: sqlite3.Connection) -> None:
+    """操作审计日志：谁在什么时候对谁做了什么。
+
+    为什么需要：用户投诉"我明明没删过那个会话"、或者账号被误停用时，
+    现在谁都说不清——没有日志，就只能靠猜。审计表只增不改，**不存密码**。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at TEXT NOT NULL,
+            actor_id TEXT,
+            actor_name TEXT,
+            action TEXT NOT NULL,
+            target TEXT,
+            result TEXT NOT NULL DEFAULT 'ok',
+            detail TEXT,
+            ip TEXT
+        )
+        """
+    )
+    # 查的时候几乎总是"按时间倒序翻最近 N 条"，或者"按动作/操作者筛"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_name, at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, at DESC)")
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
     Migration(2, "套餐字段、用量账本与订单", _v2_billing),
     Migration(3, "用量账本分开记输入/输出 token", _v3_usage_split),
+    Migration(4, "操作审计日志", _v4_audit_log),
 ]
 
 
