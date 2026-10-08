@@ -300,6 +300,32 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         """每次请求都重新读取环境，保证改完 .env 刷新页面即可生效。"""
         return Settings.from_env(env_file=getattr(self.server, "env_file", None))
 
+    def _audit(
+        self,
+        action: str,
+        *,
+        account: Account | None = None,
+        target: str = "",
+        result: str = "ok",
+        detail: Any = None,
+        actor_name: str = "",
+    ) -> None:
+        """记一条审计：谁、什么时候、对什么、做了什么。
+
+        审计是**旁路**：写失败只打印警告，不影响用户这次操作的结果。
+        """
+        from agentcode.audit import AuditLog
+
+        AuditLog(self.server.accounts).record(  # type: ignore[attr-defined]
+            action,
+            account=account if account is not None else getattr(self, "_account", None),
+            actor_name=actor_name,
+            target=target,
+            result=result,
+            detail=detail,
+            ip=self.client_address[0] if self.client_address else "",
+        )
+
     def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -519,8 +545,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "请先登录。"}, status=401)
             return
         from agentcode.lifecycle import export_archive
+        from agentcode import audit as AUDIT
 
         blob = export_archive(self._settings(), account.id, account_name=account.name)
+        self._audit(AUDIT.DATA_EXPORT, detail={"bytes": len(blob)})
         filename = f"agentcode-{account.name}-{time.strftime('%Y%m%d')}.zip"
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
@@ -534,15 +562,24 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         self._log_access(200)
 
     def _purge_code(self) -> None:
-        """清空自己的代码工作目录（含上传的文件）。会话不动。"""
+        """清空自己的代码工作目录（含上传的文件）。会话不动。
+
+        清空是**软删除**：整目录搬进回收站，用户后悔了还能拿回来。
+        """
         account = getattr(self, "_account", None)
         if account is None:
             self._send_json({"error": "请先登录。"}, status=401)
             return
+        from agentcode import audit as AUDIT
         from agentcode.lifecycle import purge_code
 
-        removed = purge_code(self._settings(), account.id)
-        self._send_json({"removed": removed})
+        try:
+            removed = purge_code(self._settings(), account.id)
+        except AgentCodeError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._audit(AUDIT.CODE_PURGE, detail={"files": removed})
+        self._send_json({"removed": removed, "recoverable": True})
 
     def _delete_account(self, payload: dict[str, Any]) -> None:
         """注销：删账号 + 全部会话 + 全部代码和上传文件。
@@ -564,12 +601,98 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
 
         from agentcode.lifecycle import delete_account
+        from agentcode import audit as AUDIT
 
+        # 审计要**先记**：账号马上就被删了，记的时候它的名字还在
+        self._audit(AUDIT.ACCOUNT_DELETE, target=account.name)
         deleted = delete_account(self.server.accounts, self._settings(), account)  # type: ignore[attr-defined]
         # 内存里缓存的会话仓库也一并丢掉
         with self.server.store_lock:  # type: ignore[attr-defined]
             self.server.user_stores.pop(account.id, None)  # type: ignore[attr-defined]
         self._send_json({"deleted": deleted})
+
+    # ------------------------------------------------------------ 回收站
+
+    def _account_id(self) -> str:
+        """当前账号 id；免登录模式没有账号，返回空串（与共享目录一致）。"""
+        account = getattr(self, "_account", None)
+        return account.id if account is not None else ""
+
+    def _trash_payload(self) -> dict[str, Any]:
+        """回收站里有什么（会话 + 代码目录备份）。"""
+        from agentcode.trash import account_trash
+
+        trash = account_trash(
+            self._settings(), self._account_id(), session_dir=self._store().directory
+        )
+        return {kind: [item.to_dict() for item in items] for kind, items in trash.items()}
+
+    def _serve_trash(self) -> None:
+        if not self._auth_ok():
+            return
+        self._send_json(self._trash_payload())
+
+    def _restore_from_trash(self, payload: dict[str, Any]) -> None:
+        """把回收站里的一条放回去。"""
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.trash import TrashError, restore_entry
+
+        kind = str(payload.get("kind") or "")
+        entry = str(payload.get("entry") or "")
+        try:
+            report = restore_entry(
+                self._settings(),
+                self._account_id(),
+                kind,
+                entry,
+                session_dir=self._store().directory,
+            )
+        except TrashError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        if kind == "session":
+            # 恢复的是磁盘文件，内存里的仓库要重读一次才看得见
+            self._store().reload()
+        self._audit(AUDIT.TRASH_RESTORE, target=entry, detail={"kind": kind})
+        self._send_json({**report, "trash": self._trash_payload()})
+
+    def _purge_from_trash(self, payload: dict[str, Any]) -> None:
+        """彻底删掉回收站里的一条（没有撤销）。"""
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.trash import TrashError, purge_entry
+
+        kind = str(payload.get("kind") or "")
+        entry = str(payload.get("entry") or "")
+        try:
+            purged = purge_entry(
+                self._settings(),
+                self._account_id(),
+                kind,
+                entry,
+                session_dir=self._store().directory,
+            )
+        except TrashError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._audit(AUDIT.TRASH_PURGE, target=entry, detail={"kind": kind, "purged": purged})
+        self._send_json({"purged": purged, "trash": self._trash_payload()})
+
+    def _empty_trash(self) -> None:
+        """清空回收站。"""
+        if not self._auth_ok():
+            return
+        from agentcode import audit as AUDIT
+        from agentcode.trash import empty_trash
+
+        removed = empty_trash(
+            self._settings(), self._account_id(), session_dir=self._store().directory
+        )
+        self._audit(AUDIT.TRASH_PURGE, target="回收站", detail={"emptied": removed})
+        self._send_json({"removed": removed, "trash": self._trash_payload()})
 
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
@@ -769,6 +892,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/export":
             self._serve_export()
             return
+        if path == "/api/trash":
+            self._serve_trash()
+            return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
     def _account_payload(self, account: Account) -> dict[str, Any]:
@@ -828,6 +954,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:  # noqa: N802 - 父类约定的方法名
+        from agentcode import audit as AUDIT
         from agentcode.web.runner import run_stream  # 延迟导入，避免循环依赖
 
         self._begin_request()
@@ -844,6 +971,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/sessions/create",
             "/api/sessions/rename",
             "/api/sessions/delete",
+            "/api/trash/restore",
+            "/api/trash/purge",
+            "/api/trash/empty",
         ):
             self._drain_body()
             self._send_json({"error": f"未找到路径 {path}。"}, status=404)
@@ -921,12 +1051,25 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._delete_account(payload)
             return
 
+        if path == "/api/trash/restore":
+            self._restore_from_trash(payload)
+            return
+
+        if path == "/api/trash/purge":
+            self._purge_from_trash(payload)
+            return
+
+        if path == "/api/trash/empty":
+            self._empty_trash()
+            return
+
         session_store: SessionStore = self._store()
         raw_session = str(payload.get("session_id") or "").strip()
         session_id = raw_session or None
 
         if path == "/api/session/reset":
             removed = session_store.reset(session_id) if session_id else False
+            self._audit(AUDIT.SESSION_RESET, target=session_id or "", detail={"reset": removed})
             self._send_json({"reset": removed, "session_id": session_id})
             return
 
@@ -938,6 +1081,11 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/sessions/rename":
             renamed = session_store.rename(session_id or "", payload.get("name"))
             record = session_store.record(session_id or "")
+            self._audit(
+                AUDIT.SESSION_RENAME,
+                target=str(payload.get("name") or ""),
+                detail={"session_id": session_id, "renamed": renamed},
+            )
             self._send_json(
                 {
                     "renamed": renamed,
@@ -947,7 +1095,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/sessions/delete":
-            self._send_json({"deleted": session_store.delete(session_id or "")})
+            record = session_store.record(session_id or "")
+            deleted = session_store.delete(session_id or "")
+            self._audit(
+                AUDIT.SESSION_DELETE,
+                target=(record.name if record is not None else session_id or ""),
+                detail={"session_id": session_id, "deleted": deleted, "soft": True},
+            )
+            self._send_json({"deleted": deleted, "recoverable": True})
             return
 
         task = str(payload.get("task") or "").strip()
@@ -1043,16 +1198,30 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_login(self, payload: dict[str, Any]) -> None:
         """校验账号密码并下发签名 cookie。"""
+        from agentcode import audit as AUDIT
+        from agentcode.audit import AuditLog
+
         accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
         name = str(payload.get("name") or "").strip()
         password = str(payload.get("password") or "")
         account = accounts.verify(name, password)
+        ip = self.client_address[0] if self.client_address else ""
         if account is None:
             # 不区分"账号不存在"与"密码错误"，避免账号枚举
             REJECTIONS.inc(reason="bad_credentials")
+            # 审计里也只记"凭据不对"：写清楚哪个用户名错了就够查，不写字面密码
+            # 这里直接写库而不是走 _audit：此刻不能把"带 cookie 的旧账号"当成操作者
+            AuditLog(self.server.accounts).record(  # type: ignore[attr-defined]
+                AUDIT.LOGIN_FAIL,
+                actor_name=name,
+                result="denied",
+                detail={"reason": "bad_credentials"},
+                ip=ip,
+            )
             self._send_json({"error": "账号或密码不正确。"}, status=401)
             return
 
+        self._audit(AUDIT.LOGIN_OK, account=account)
         token = create_token(account.id, self.server.secret_key)  # type: ignore[attr-defined]
         body = json.dumps(
             {"account": self._account_payload(account)}, ensure_ascii=False
@@ -1219,6 +1388,36 @@ def serve(
         ).start()
     else:
         print("数据留存：不自动清理，删不删由用户自己在网页上决定")
+
+    # 定期清理：回收站（AGENT_TRASH_DAYS）与审计日志（AGENT_AUDIT_DAYS）。
+    # 启动时先扫一遍，之后交给后台循环——都是"过了保留期就该消失"的杂活。
+    from agentcode.lifecycle import housekeeping_once, run_housekeeping_loop
+
+    cleaned = housekeeping_once(accounts, settings_for_limits)
+    trash_kept = int(settings_for_limits.trash_days)
+    audit_kept = int(settings_for_limits.audit_days)
+    print(
+        "回收站："
+        + (
+            f"保留 {trash_kept} 天（启动时清掉 {cleaned['trash']['sessions'] + cleaned['trash']['code']} 项）"
+            if trash_kept > 0
+            else "不自动清理，里面的东西一直留着"
+        )
+    )
+    print(
+        "审计日志："
+        + (
+            f"保留 {audit_kept} 天（启动时清掉 {cleaned['audit']} 条）"
+            if audit_kept > 0
+            else "永久保留"
+        )
+    )
+    threading.Thread(
+        target=run_housekeeping_loop,
+        args=(accounts, settings_for_limits),
+        name="agentcode-housekeeping",
+        daemon=True,
+    ).start()
 
     # 自动备份：默认关闭（AGENT_BACKUP_DIR 不配就不备）。配了就先在后台查一次
     # ——"今天还没有备份"恰恰是启动这一刻的状态——之后每小时看一次。

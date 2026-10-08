@@ -82,7 +82,7 @@
             <button type="button" id="data-close" class="icon" aria-label="关闭">✕</button>
           </header>
           <p class="billing-usage-text">
-            导出会把你的全部会话和代码目录打包成 zip。删除是不可撤销的。
+            导出会把你的全部会话和代码目录打包成 zip。删掉的东西先进回收站，还能找回来。
           </p>
           <div class="data-actions">
             <button type="button" id="data-export" class="data-button">导出我的数据</button>
@@ -91,9 +91,22 @@
               注销账号…
             </button>
           </div>
+          <section class="trash">
+            <header class="trash-head">
+              <strong>回收站</strong>
+              <span class="billing-expiry" id="trash-hint"></span>
+            </header>
+            <div id="trash-list" class="trash-list"></div>
+            <div class="data-actions">
+              <button type="button" id="trash-empty" class="data-button is-danger">
+                清空回收站
+              </button>
+            </div>
+          </section>
           <div id="data-confirm" class="data-confirm" hidden>
             <p class="billing-usage-text">
-              这会删掉你的账号、全部会话、全部代码与上传的文件，<strong>不可撤销</strong>。
+              这会删掉你的账号、全部会话、全部代码与上传的文件（包括回收站里
+              留的那些），<strong>不可撤销</strong>。
               输入你的用户名 <code id="data-confirm-name"></code> 以确认：
             </p>
             <input id="data-confirm-input" autocomplete="off" />

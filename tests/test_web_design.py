@@ -20,6 +20,28 @@ def _js() -> str:
 # ------------------------------------------------------------ 套餐与用量面板
 
 
+def test_data_panel_has_a_trash_section():
+    """回收站要在「我的数据」面板里：删错的东西得有个地方找回来。"""
+    html = _html()
+    assert 'id="trash-list"' in html
+    assert 'id="trash-empty"' in html
+    js = _js()
+    assert "/api/trash" in js
+    assert "/api/trash/restore" in js
+    assert "/api/trash/purge" in js
+    assert "/api/trash/empty" in js
+
+
+def test_trash_rows_have_both_actions():
+    js = _js()
+    assert "renderTrashItem" in js
+    assert '"恢复"' in js
+    assert '"彻底删除"' in js
+    css = " ".join(_css().split())
+    assert ".trash-item" in css
+    assert ".trash-actions" in css
+
+
 def test_billing_panel_exists_in_markup():
     html = _html()
     assert 'id="billing-panel"' in html

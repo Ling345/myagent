@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from agentcode.core.agent import BaseAgent
 from agentcode.memory import ShortTermMemory
+from agentcode.trash import STAMP_FORMAT, TRASH_DIRNAME
 
 DEFAULT_MAX_SESSIONS = 20
 DEFAULT_MEMORY_TURNS = 5
@@ -42,6 +43,11 @@ def default_session_dir() -> str:
 def _now() -> str:
     """当前时间的 ISO 字符串（UTC，精确到微秒）。"""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _stamp() -> str:
+    """回收站条目名里的时间戳（UTC，格式与 :mod:`agentcode.trash` 一致）。"""
+    return datetime.now(timezone.utc).strftime(STAMP_FORMAT)
 
 
 def clean_name(name: Any, fallback: str = DEFAULT_SESSION_NAME) -> str:
@@ -180,6 +186,29 @@ class SessionStore:
         except OSError:
             pass
 
+    def _move_to_trash(self, record: SessionRecord) -> None:
+        """把会话文件搬进回收站（软删除）。
+
+        搬不动才退回真删——但那时要**说出来**：用户以为还能恢复、
+        实际已经没了，是最坏的结果。
+        """
+        path = self._path(record.id)
+        if path is None or self.directory is None:
+            return
+        payload = record.to_dict()
+        payload["deleted_at"] = _now()
+        try:
+            folder = self.directory / TRASH_DIRNAME
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / f"{path.stem}-{_stamp()}{path.suffix}"
+            target.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"警告：会话进回收站失败（{exc}），已直接删除。")
+            self._remove_file(record.id)
+
     def _prune(self) -> None:
         """超出上限时丢掉最久没用的会话（连同文件）。"""
         while len(self._sessions) > self.max_sessions:
@@ -254,14 +283,33 @@ class SessionStore:
             self._persist(record)
             return True
 
-    def delete(self, session_id: str) -> bool:
-        """删除会话及其文件。"""
+    def delete(self, session_id: str, *, soft: bool = True) -> bool:
+        """删除会话。
+
+        默认**进回收站**（可恢复）：删错一个会话是常有的事，直接 rmtree 之后
+        能做的只有道歉。``soft=False`` 才是真删（注销账号、用户明确说"彻底删"）。
+        """
         with self._lock:
             record = self._sessions.pop(str(session_id or ""), None)
             if record is None:
                 return False
-            self._remove_file(record.id)
+            if soft:
+                self._move_to_trash(record)
+            else:
+                self._remove_file(record.id)
             return True
+
+    def reload(self) -> None:
+        """重新从磁盘读会话。
+
+        外部改了文件之后要叫一次——最典型的就是"从回收站恢复了一个会话"，
+        不重读的话页面上还是看不到它。
+        """
+        with self._lock:
+            self._load_from_disk()
+            self._sequence = max(
+                [self._sequence] + [item.seq for item in self._sessions.values()]
+            )
 
     def reset(self, session_id: str) -> bool:
         """清空某个会话的记录与记忆（会话本身保留）。"""
