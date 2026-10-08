@@ -88,6 +88,18 @@ DEFAULT_BACKUP_KEEP = 7
 DEFAULT_AUDIT_DAYS = 180
 #: 回收站保留多少天；0 = 不自动清理
 DEFAULT_TRASH_DAYS = 30
+#: 用户通知：webhook 与 SMTP 二选一（都没配就只记台账、不假装发出去）
+DEFAULT_NOTIFY_WEBHOOK = ""
+DEFAULT_SMTP_HOST = ""
+DEFAULT_SMTP_PORT = 465
+DEFAULT_SMTP_USER = ""
+DEFAULT_SMTP_PASSWORD = ""
+DEFAULT_SMTP_FROM = ""
+#: 套餐到期前几天提醒
+DEFAULT_NOTIFY_EXPIRING_DAYS = 3
+#: 同一账号多少分钟内失败几次登录就提醒本人
+DEFAULT_NOTIFY_LOGIN_FAILURES = 5
+DEFAULT_NOTIFY_LOGIN_WINDOW_MINUTES = 10
 
 
 def mask_secret(value: str | None) -> str:
@@ -199,6 +211,19 @@ class Settings:
     audit_days: int = DEFAULT_AUDIT_DAYS
     #: 回收站保留多少天；0 = 不自动清理（里面的东西一直留着）
     trash_days: int = DEFAULT_TRASH_DAYS
+    #: 用户通知：webhook（POST 一段 JSON）；留空则看 SMTP
+    notify_webhook: str = DEFAULT_NOTIFY_WEBHOOK
+    #: 用户通知：SMTP 发信（标准库 smtplib，无新依赖）
+    smtp_host: str = DEFAULT_SMTP_HOST
+    smtp_port: int = DEFAULT_SMTP_PORT
+    smtp_user: str = DEFAULT_SMTP_USER
+    smtp_password: str = DEFAULT_SMTP_PASSWORD
+    smtp_from: str = DEFAULT_SMTP_FROM
+    #: 套餐到期前多少天提醒
+    notify_expiring_days: int = DEFAULT_NOTIFY_EXPIRING_DAYS
+    #: 同一账号短时间失败几次登录就提醒本人
+    notify_login_failures: int = DEFAULT_NOTIFY_LOGIN_FAILURES
+    notify_login_window_minutes: int = DEFAULT_NOTIFY_LOGIN_WINDOW_MINUTES
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -312,6 +337,21 @@ class Settings:
             backup_keep=_to_int(pick("AGENT_BACKUP_KEEP"), DEFAULT_BACKUP_KEEP),
             audit_days=_to_int(pick("AGENT_AUDIT_DAYS"), DEFAULT_AUDIT_DAYS),
             trash_days=_to_int(pick("AGENT_TRASH_DAYS"), DEFAULT_TRASH_DAYS),
+            notify_webhook=str(pick("AGENT_NOTIFY_WEBHOOK", DEFAULT_NOTIFY_WEBHOOK) or ""),
+            smtp_host=str(pick("AGENT_SMTP_HOST", DEFAULT_SMTP_HOST) or ""),
+            smtp_port=_to_int(pick("AGENT_SMTP_PORT"), DEFAULT_SMTP_PORT),
+            smtp_user=str(pick("AGENT_SMTP_USER", DEFAULT_SMTP_USER) or ""),
+            smtp_password=pick("AGENT_SMTP_PASSWORD"),
+            smtp_from=str(pick("AGENT_SMTP_FROM", DEFAULT_SMTP_FROM) or ""),
+            notify_expiring_days=_to_int(
+                pick("AGENT_NOTIFY_EXPIRING_DAYS"), DEFAULT_NOTIFY_EXPIRING_DAYS
+            ),
+            notify_login_failures=_to_int(
+                pick("AGENT_NOTIFY_LOGIN_FAILURES"), DEFAULT_NOTIFY_LOGIN_FAILURES
+            ),
+            notify_login_window_minutes=_to_int(
+                pick("AGENT_NOTIFY_LOGIN_WINDOW_MINUTES"), DEFAULT_NOTIFY_LOGIN_WINDOW_MINUTES
+            ),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -440,6 +480,14 @@ class Settings:
             + ("（永久保留）" if self.audit_days <= 0 else ""),
             "AGENT_TRASH_DAYS": str(self.trash_days)
             + ("（不自动清理）" if self.trash_days <= 0 else ""),
+            "AGENT_NOTIFY_WEBHOOK": mask_secret(self.notify_webhook),
+            "AGENT_SMTP_HOST": self.smtp_host or "（未配置）",
+            "AGENT_SMTP_PORT": str(self.smtp_port),
+            "AGENT_SMTP_USER": self.smtp_user or "（未配置）",
+            "AGENT_SMTP_PASSWORD": mask_secret(self.smtp_password),
+            "AGENT_SMTP_FROM": self.smtp_from or "（未配置）",
+            "AGENT_NOTIFY_EXPIRING_DAYS": str(self.notify_expiring_days),
+            "AGENT_NOTIFY_LOGIN_FAILURES": str(self.notify_login_failures),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),
