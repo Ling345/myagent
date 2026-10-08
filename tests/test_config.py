@@ -58,3 +58,35 @@ def test_masked_hides_api_key(settings):
     masked = settings.masked()
     assert masked["LLM_API_KEY"] == "sk-t******7890"
     assert masked["LLM_MODEL_ID"] == "test-model"
+
+
+def test_backup_settings_are_read_from_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_BACKUP_DIR", str(tmp_path / "backups"))
+    monkeypatch.setenv("AGENT_BACKUP_INTERVAL_HOURS", "6")
+    monkeypatch.setenv("AGENT_BACKUP_KEEP", "3")
+    settings = Settings.from_env(env_file=str(tmp_path / "missing.env"), search_parents=False)
+    assert settings.backup_dir == str(tmp_path / "backups")
+    assert settings.backup_interval_hours == 6.0
+    assert settings.backup_keep == 3
+
+
+def test_backup_settings_show_up_in_the_masked_summary(settings, tmp_path):
+    """自动备份开没开，得能在 agentcode config 里一眼看到。"""
+    settings.backup_dir = str(tmp_path / "backups")
+    masked = settings.masked()
+    assert masked["AGENT_BACKUP_DIR"] == str(tmp_path / "backups")
+    assert "AGENT_BACKUP_KEEP" in masked
+
+
+def test_validate_rejects_a_backup_interval_that_never_fires(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("LLM_MODEL_ID", "test-model")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"AGENT_BACKUP_DIR={tmp_path / 'backups'}\nAGENT_BACKUP_INTERVAL_HOURS=0\n",
+        encoding="utf-8",
+    )
+    settings = Settings.from_env(env_file=str(env_file), search_parents=False)
+    with pytest.raises(ConfigError):
+        settings.validate()
