@@ -912,6 +912,8 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         raw_steps = payload.get("max_steps")
         max_steps = int(raw_steps) if isinstance(raw_steps, int) and raw_steps > 0 else None
         session_id = str(payload.get("session_id") or "").strip() or None
+        wants_async = bool(payload.get("async"))
+        request_key = str(self.headers.get("Idempotency-Key") or "").strip()
 
         accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
         allowed, reason = accounts.check_quota(account)
@@ -920,6 +922,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._notify_quota(account)
             self._send_json({"error": reason}, status=402)
             return
+
+        # 幂等：同一个键 = 同一单。判断放在限流闸门**之前**——"重发"不该被并发
+        # 限制挡成 429，它就是同一件还没跑完的事。
+        if request_key:
+            existing = accounts.find_api_run_by_key(account.id, request_key)
+            if existing is not None:
+                self._replay_api_run(existing)
+                return
 
         settings = self._settings()
         plan = accounts.effective_plan(account)
@@ -939,6 +949,121 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._reject_by_limit(decision)
             return
 
+        run_id = uuid.uuid4().hex[:12]
+        # 先落台账再干活：并发重发撞上同一个幂等键时，靠数据库的唯一索引分辨
+        created = accounts.create_api_run(
+            run_id,
+            account_id=account.id,
+            agent=agent_name,
+            task=task,
+            token_id=str(token["id"]),
+            session_id=session_id or "",
+            request_key=request_key,
+        )
+        if not created:
+            existing = (
+                accounts.find_api_run_by_key(account.id, request_key) if request_key else None
+            )
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+            if existing is not None:
+                self._replay_api_run(existing)
+                return
+            self._send_json({"error": "任务提交冲突，请稍后重试。"}, status=409)
+            return
+
+        job = {
+            "account": account,
+            "token": token,
+            "run_id": run_id,
+            "agent_name": agent_name,
+            "task": task,
+            "session_id": session_id,
+            "max_steps": max_steps,
+            "settings": settings,
+            "guard_key": guard_key,
+            "request_key": request_key,
+        }
+        if wants_async:
+            # 丢后台线程，立刻把 run_id 交出去——长任务不该让客户端干等
+            threading.Thread(
+                target=self._execute_api_job,
+                kwargs=job,
+                name=f"agentcode-api-{run_id}",
+                daemon=True,
+            ).start()
+            self._send_json(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "agent": agent_name,
+                    "session_id": session_id or "",
+                    "poll": f"/v1/runs/{run_id}",
+                    "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
+                    "elapsed_ms": 0,
+                },
+                status=202,
+            )
+            return
+
+        body = self._execute_api_job(**job)
+        if body.get("success"):
+            self._send_json(body)
+            return
+        self._send_json(body, status=502)
+
+    def _replay_api_run(self, record: dict[str, Any]) -> None:
+        """把同一个幂等键的那一单原样还回去——**不重跑、不重复扣费**。"""
+        status = str(record.get("status") or "")
+        body: dict[str, Any] = {
+            "run_id": record["run_id"],
+            "agent": record["agent"],
+            "session_id": record["session_id"] or "",
+            "idempotent_replay": True,
+        }
+        if status == "running":
+            # 还在跑：告诉调用方"就是这一单，去轮询"，而不是再开一单
+            body.update(
+                {
+                    "status": "running",
+                    "poll": f"/v1/runs/{record['run_id']}",
+                    "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
+                    "elapsed_ms": 0,
+                }
+            )
+            self._send_json(body, status=202)
+            return
+        body.update(dict(record.get("result") or {}))
+        body["idempotent_replay"] = True
+        body["status"] = status
+        if status == "succeeded":
+            self._send_json(body)
+            return
+        body.setdefault("error", record.get("error") or "任务没能完成。")
+        self._send_json(body, status=502)
+
+    def _execute_api_job(
+        self,
+        *,
+        account: Account,
+        token: dict[str, Any],
+        run_id: str,
+        agent_name: str,
+        task: str,
+        session_id: str | None,
+        max_steps: int | None,
+        settings: Settings,
+        guard_key: str,
+        request_key: str = "",
+    ) -> dict[str, Any]:
+        """真正跑一次任务：同步直接调用它，异步在后台线程里调用它。
+
+        两条路**同一段代码**——否则迟早出现"同步和异步行为不一样"。
+        无论成功失败，结果都写回台账（``api_runs``），进程重启后还取得到。
+        """
+        from agentcode import audit as AUDIT
+        from agentcode.web.runner import run_stream
+
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
         # 后端由服务端决定：调用方不能在请求里挑 mock 去拿假答案
         llm_mode = str(getattr(self.server, "llm_mode", "mock"))
         started = time.perf_counter()
@@ -958,16 +1083,16 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                     answer_event = event
                 elif event.get("type") == "error":
                     error_message = str((event.get("data") or {}).get("message") or "任务没能完成。")
-        except Exception as exc:  # noqa: BLE001 - 同步接口要把失败如实告诉调用方
+        except Exception as exc:  # noqa: BLE001 - 失败也要如实告诉调用方
             error_message = f"运行失败：{exc}"
         finally:
+            # 闸门在这里放：异步任务的并发名额要占到跑完，否则并发限制成了摆设
             self.server.guard.release(guard_key)  # type: ignore[attr-defined]
 
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         data = dict((answer_event or {}).get("data") or {})
         usage = dict(data.get("usage") or {})
         total_tokens = int(usage.get("total_tokens") or 0)
-        run_id = uuid.uuid4().hex[:12]
         # 记账走同一条账本：网页、CLI、API 的用量从同一个地方算钱
         accounts.record_usage(
             account.id,
@@ -990,6 +1115,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 "tokens": total_tokens,
                 "session_id": session_id or "",
                 "ms": elapsed_ms,
+                "idempotency_key": request_key,
             },
         )
 
@@ -1010,9 +1136,66 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         }
         if error_message:
             body["error"] = error_message
-            self._send_json(body, status=502)
+        accounts.finish_api_run(run_id, result=body, error=error_message)
+        return body
+
+    def _serve_api_run_status(self, run_id: str) -> None:
+        """GET /v1/runs/<run_id>：这一单跑到哪了、结果是什么。"""
+        gate = self._api_gate()
+        if gate is None:
             return
+        account, _token = gate
+        store: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        record = store.api_run(run_id)
+        if record is None or record["account_id"] != account.id:
+            # 别人的任务和"不存在"回一样的东西：别泄露别人跑过什么
+            self._send_json({"error": f"没有这个任务：{run_id}。"}, status=404)
+            return
+        result = dict(record.get("result") or {})
+        body: dict[str, Any] = {
+            "run_id": record["run_id"],
+            "status": record["status"],
+            "agent": record["agent"],
+            "task": record["task"],
+            "session_id": record["session_id"] or "",
+            "created_at": record["created_at"],
+            "finished_at": record["finished_at"] or "",
+        }
+        if record["status"] == "succeeded":
+            body.update(
+                {
+                    "success": True,
+                    "answer": result.get("answer", ""),
+                    "artifacts": result.get("artifacts", []),
+                    "usage": result.get("usage", {}),
+                    "elapsed_ms": result.get("elapsed_ms", 0),
+                }
+            )
+        elif record["status"] == "failed":
+            body.update(
+                {
+                    "success": False,
+                    "error": record["error"] or result.get("error") or "任务没能完成。",
+                    "usage": result.get("usage", {}),
+                }
+            )
+        else:
+            body["success"] = None
         self._send_json(body)
+
+    def _serve_api_runs(self) -> None:
+        """GET /v1/runs：最近的任务列表（不带结果正文，免得响应太大）。"""
+        gate = self._api_gate()
+        if gate is None:
+            return
+        account, _token = gate
+        query = parse_qs(urlsplit(self.path).query)
+        try:
+            limit = int((query.get("limit") or ["20"])[0])
+        except ValueError:
+            limit = 20
+        store: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        self._send_json({"runs": store.api_runs(account.id, limit=max(1, min(100, limit)))})
 
     def _may_access_run(self, record: Any) -> bool:
         """登录模式下只能看自己的运行；免登录模式不设限。"""
@@ -1223,6 +1406,12 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/v1/me":
             self._serve_api_me()
+            return
+        if path == "/v1/runs":
+            self._serve_api_runs()
+            return
+        if path.startswith("/v1/runs/"):
+            self._serve_api_run_status(path[len("/v1/runs/") :])
             return
         self._send_json({"error": f"未找到路径 {path}。"}, status=404)
 
