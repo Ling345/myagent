@@ -84,6 +84,10 @@ DEFAULT_PRICE_OUTPUT_PER_MILLION = 0
 DEFAULT_BACKUP_DIR = ""
 DEFAULT_BACKUP_INTERVAL_HOURS = 24.0
 DEFAULT_BACKUP_KEEP = 7
+#: 审计日志保留多少天；0 = 永久保留
+DEFAULT_AUDIT_DAYS = 180
+#: 回收站保留多少天；0 = 不自动清理
+DEFAULT_TRASH_DAYS = 30
 
 
 def mask_secret(value: str | None) -> str:
@@ -191,6 +195,10 @@ class Settings:
     backup_interval_hours: float = DEFAULT_BACKUP_INTERVAL_HOURS
     #: 自动备份保留几份（只删自己生成的那种名字）
     backup_keep: int = DEFAULT_BACKUP_KEEP
+    #: 审计日志保留多少天；0 = 永久保留
+    audit_days: int = DEFAULT_AUDIT_DAYS
+    #: 回收站保留多少天；0 = 不自动清理（里面的东西一直留着）
+    trash_days: int = DEFAULT_TRASH_DAYS
     env_file: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -302,6 +310,8 @@ class Settings:
                 pick("AGENT_BACKUP_INTERVAL_HOURS"), DEFAULT_BACKUP_INTERVAL_HOURS
             ),
             backup_keep=_to_int(pick("AGENT_BACKUP_KEEP"), DEFAULT_BACKUP_KEEP),
+            audit_days=_to_int(pick("AGENT_AUDIT_DAYS"), DEFAULT_AUDIT_DAYS),
+            trash_days=_to_int(pick("AGENT_TRASH_DAYS"), DEFAULT_TRASH_DAYS),
             env_file=str(resolved) if resolved else None,
         )
 
@@ -426,6 +436,10 @@ class Settings:
             "AGENT_BACKUP_DIR": self.backup_dir or "（不自动备份）",
             "AGENT_BACKUP_INTERVAL_HOURS": str(self.backup_interval_hours),
             "AGENT_BACKUP_KEEP": str(self.backup_keep),
+            "AGENT_AUDIT_DAYS": str(self.audit_days)
+            + ("（永久保留）" if self.audit_days <= 0 else ""),
+            "AGENT_TRASH_DAYS": str(self.trash_days)
+            + ("（不自动清理）" if self.trash_days <= 0 else ""),
             "AGENT_SECRET_KEY": mask_secret(self.secret_key),
             "AGENT_DB_PATH": self.db_path,
             "AGENT_MEMORY_TURNS": str(self.memory_turns),

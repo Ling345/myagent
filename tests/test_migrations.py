@@ -199,3 +199,49 @@ def test_v3_leaves_old_rows_without_a_split(tmp_path):
     assert row[0] == 100
     assert row[1] is None
     assert row[2] is None
+
+
+# ---------------------------------------------------------------- v4：审计日志
+
+
+def test_v4_creates_the_audit_log(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+
+    assert "audit_log" in _tables(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    assert {
+        "at",
+        "actor_id",
+        "actor_name",
+        "action",
+        "target",
+        "result",
+        "detail",
+        "ip",
+    } <= columns
+
+
+def test_v4_reaches_an_old_database_without_losing_it(tmp_path):
+    """现役库（v1 结构 + 真实账号）升上来必须既能用、又能记审计。"""
+    conn = _connect(tmp_path)
+    _make_legacy_database(conn)
+    conn.execute(
+        "INSERT INTO accounts (id, name, password_hash, plan, daily_token_limit, is_active,"
+        " created_at) VALUES ('a1', 'alice', 'hash', 'free', 50000, 1, '2026-09-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    version = run_migrations(conn)
+
+    assert version >= 4
+    assert "audit_log" in _tables(conn)
+    assert conn.execute("SELECT name FROM accounts WHERE id = 'a1'").fetchone()[0] == "alice"
+
+
+def test_v4_is_idempotent(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+    first = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    run_migrations(conn)
+    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == first
