@@ -19,8 +19,8 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v7**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
 | 代码量 | `agentcode/` 约 1.1 万行 Python；67 个测试文件 |
-| 测试 | **824 项全部离线**（不打真实模型、不联网、不发行邮件） |
-| 提交 | 84 次；PR #1–#14 已合并（#2 是重复提交，已关闭未合并） |
+| 测试 | **827 项全部离线**（不打真实模型、不联网、不发行邮件） |
+| 提交 | 85 次；PR #1–#15 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -62,6 +62,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | #12 | 通知邮箱 + 通知（webhook / SMTP，迁移 v5） |
 | #13 | 对外 API：API 令牌 + `POST /v1/run` / `GET /v1/me`（迁移 v6） |
 | #14 | 对外 API 的异步任务与幂等键（任务台账落库，迁移 v7） |
+| #15 | 接续说明 `docs/state.md` + 防过期测试（本文件） |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
