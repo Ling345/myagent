@@ -288,3 +288,41 @@ def test_v5_upgrades_an_old_database_without_losing_the_rest(tmp_path):
         == "alice@example.com"
     )
     assert conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- v8：任务完成回调
+
+
+def test_v8_adds_the_callback_columns(tmp_path):
+    """回调状态要落库：不落库的话，服务重启就把待发的回调弄丢了。"""
+    conn = _connect(tmp_path)
+    run_migrations(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(api_runs)")}
+    assert {
+        "callback_url",
+        "callback_status",
+        "callback_attempts",
+        "callback_error",
+        "callback_next_at",
+        "callback_delivered_at",
+    } <= columns
+
+
+def test_v7_database_upgrades_to_v8_without_losing_runs(tmp_path):
+    conn = _connect(tmp_path)
+    run_migrations(conn, [m for m in MIGRATIONS if m.version <= 7])
+    conn.execute(
+        "INSERT INTO api_runs (run_id, account_id, agent, task, status, created_at)"
+        " VALUES ('old-1', 'a1', 'echo', '老任务', 'succeeded', '2026-10-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    version = run_migrations(conn)
+
+    assert version >= 8
+    row = conn.execute(
+        "SELECT task, callback_status FROM api_runs WHERE run_id = 'old-1'"
+    ).fetchone()
+    assert row[0] == "老任务"
+    assert row[1] is None  # 老任务没有回调，留空表示"没有这回事"

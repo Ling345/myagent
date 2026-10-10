@@ -95,6 +95,12 @@ DEFAULT_NOTIFY_WEBHOOK = ""
 DEFAULT_API_ENABLED = True
 #: 对外 API 的任务台账保留多少天（异步任务的结果要留着给调用方取）
 DEFAULT_API_RUNS_DAYS = 7
+#: 任务完成回调：签名密钥留空则回落 AGENT_SECRET_KEY；重试次数、超时、端口白名单
+DEFAULT_CALLBACK_MAX_ATTEMPTS = 4
+DEFAULT_CALLBACK_TIMEOUT = 10.0
+DEFAULT_CALLBACK_PORTS = "80,443"
+#: 允许回调内网/本机地址——只给本地开发与测试用，公网部署别开
+DEFAULT_CALLBACK_ALLOW_PRIVATE = False
 DEFAULT_SMTP_HOST = ""
 DEFAULT_SMTP_PORT = 465
 DEFAULT_SMTP_USER = ""
@@ -222,6 +228,16 @@ class Settings:
     api_enabled: bool = DEFAULT_API_ENABLED
     #: 对外 API 的任务台账保留多少天；0 = 永久保留
     api_runs_days: int = DEFAULT_API_RUNS_DAYS
+    #: 任务完成回调的签名密钥；留空回落 AGENT_SECRET_KEY（两个都没有就拒收 callback_url）
+    callback_secret: str | None = None
+    #: 一个回调最多投递几次（含首次）；4xx 视为永久失败，不占重试次数
+    callback_max_attempts: int = DEFAULT_CALLBACK_MAX_ATTEMPTS
+    #: 单次投递的连接/读取超时（秒）
+    callback_timeout: float = DEFAULT_CALLBACK_TIMEOUT
+    #: 允许的回调端口（逗号分隔）
+    callback_ports: str = DEFAULT_CALLBACK_PORTS
+    #: 允许回调内网/本机地址（本地开发与测试用）
+    callback_allow_private: bool = DEFAULT_CALLBACK_ALLOW_PRIVATE
     #: 用户通知：SMTP 发信（标准库 smtplib，无新依赖）
     smtp_host: str = DEFAULT_SMTP_HOST
     smtp_port: int = DEFAULT_SMTP_PORT
@@ -349,6 +365,19 @@ class Settings:
             notify_webhook=str(pick("AGENT_NOTIFY_WEBHOOK", DEFAULT_NOTIFY_WEBHOOK) or ""),
             api_enabled=_to_bool(pick("AGENT_API_ENABLED"), DEFAULT_API_ENABLED),
             api_runs_days=_to_int(pick("AGENT_API_RUNS_DAYS"), DEFAULT_API_RUNS_DAYS),
+            callback_secret=pick("AGENT_CALLBACK_SECRET"),
+            callback_max_attempts=_to_int(
+                pick("AGENT_CALLBACK_MAX_ATTEMPTS"), DEFAULT_CALLBACK_MAX_ATTEMPTS
+            ),
+            callback_timeout=_to_float(
+                pick("AGENT_CALLBACK_TIMEOUT"), DEFAULT_CALLBACK_TIMEOUT
+            ),
+            callback_ports=str(
+                pick("AGENT_CALLBACK_PORTS", DEFAULT_CALLBACK_PORTS) or DEFAULT_CALLBACK_PORTS
+            ),
+            callback_allow_private=_to_bool(
+                pick("AGENT_CALLBACK_ALLOW_PRIVATE"), DEFAULT_CALLBACK_ALLOW_PRIVATE
+            ),
             smtp_host=str(pick("AGENT_SMTP_HOST", DEFAULT_SMTP_HOST) or ""),
             smtp_port=_to_int(pick("AGENT_SMTP_PORT"), DEFAULT_SMTP_PORT),
             smtp_user=str(pick("AGENT_SMTP_USER", DEFAULT_SMTP_USER) or ""),
@@ -421,6 +450,8 @@ class Settings:
             "AGENT_RUN_TOKEN_BUDGET": self.run_token_budget,
             "AGENT_KEY_FAILURE_THRESHOLD": self.key_failure_threshold,
             "AGENT_KEY_COOLDOWN_SECONDS": self.key_cooldown_seconds,
+            "AGENT_CALLBACK_MAX_ATTEMPTS": self.callback_max_attempts,
+            "AGENT_CALLBACK_TIMEOUT": self.callback_timeout,
         }
         for name, value in limits.items():
             if value <= 0:
@@ -495,6 +526,20 @@ class Settings:
             "AGENT_API_ENABLED": "是" if self.api_enabled else "否（/v1/* 关闭）",
             "AGENT_API_RUNS_DAYS": str(self.api_runs_days)
             + ("（永久保留）" if self.api_runs_days <= 0 else ""),
+            # 回调的签名密钥按密钥处理：它能让攻击者伪造回调
+            "AGENT_CALLBACK_SECRET": (
+                mask_secret(self.callback_secret)
+                if self.callback_secret
+                else (
+                    f"（未配置，回落 AGENT_SECRET_KEY：{mask_secret(self.secret_key)}）"
+                    if self.secret_key
+                    else "（未配置，带 callback_url 的请求会被拒绝）"
+                )
+            ),
+            "AGENT_CALLBACK_MAX_ATTEMPTS": str(self.callback_max_attempts),
+            "AGENT_CALLBACK_TIMEOUT": str(self.callback_timeout),
+            "AGENT_CALLBACK_PORTS": self.callback_ports,
+            "AGENT_CALLBACK_ALLOW_PRIVATE": "是" if self.callback_allow_private else "否",
             "AGENT_SMTP_HOST": self.smtp_host or "（未配置）",
             "AGENT_SMTP_PORT": str(self.smtp_port),
             "AGENT_SMTP_USER": self.smtp_user or "（未配置）",

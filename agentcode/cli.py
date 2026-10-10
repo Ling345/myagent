@@ -280,6 +280,12 @@ def build_parser() -> argparse.ArgumentParser:
     api_list.add_argument("account", help="账号名")
     api_list.add_argument("--limit", type=int, default=20, help="看多少条，默认 20")
     api_list.add_argument("--json", action="store_true", help="以 JSON 输出")
+    api_callbacks = api_sub.add_parser(
+        "callbacks", help="看某个账号的完成回调投递到了哪一步"
+    )
+    api_callbacks.add_argument("account", help="账号名")
+    api_callbacks.add_argument("--limit", type=int, default=20, help="看多少条，默认 20")
+    api_callbacks.add_argument("--json", action="store_true", help="以 JSON 输出")
 
     trash_parser = subparsers.add_parser("trash", help="回收站：误删的东西在这里")
     trash_sub = trash_parser.add_subparsers(dest="trash_command", required=True)
@@ -705,6 +711,9 @@ def _api_command(args: argparse.Namespace) -> int:
 
     卡在 ``running`` 的旧记录会在定期清理里被标成失败（服务重启、线程意外死掉
     都会留下这种记录）——所以看到失败先看 ``error`` 写了什么，那是原因。
+
+    异步任务配了 ``callback_url`` 的话，投递到了哪一步也记在同一行台账里
+    （``api callbacks <账号>`` 看细节）。
     """
     from agentcode.accounts import AccountStore
     from agentcode.config import DEFAULT_DB_PATH
@@ -714,6 +723,8 @@ def _api_command(args: argparse.Namespace) -> int:
     if account is None:
         print(f"错误：没有这个账号：{args.account}")
         return 2
+    if args.api_command == "callbacks":
+        return _api_callbacks(store, account, args)
     runs = store.api_runs(account.id, limit=max(1, int(args.limit)))
     if args.json:
         print(json.dumps({"runs": runs}, ensure_ascii=False))
@@ -728,8 +739,65 @@ def _api_command(args: argparse.Namespace) -> int:
             str(item["status"]), str(item["status"])
         )
         key = f"  幂等键 {item['request_key']}" if item["request_key"] else ""
-        print(f"  {item['created_at']}  {item['run_id']}  {item['agent']:<12} {mark}  {task}{key}")
+        callback = _callback_mark(item)
+        print(
+            f"  {item['created_at']}  {item['run_id']}  {item['agent']:<12}"
+            f" {mark}  {task}{key}{callback}"
+        )
     print("  要看某个任务的答案：GET /v1/runs/<run_id>（带令牌）")
+    return 0
+
+
+def _callback_mark(item: dict[str, Any]) -> str:
+    """``api list`` 里那一小段回调状态；没有回调就什么都不加。"""
+    status = str(item.get("callback_status") or "none")
+    attempts = int(item.get("callback_attempts") or 0)
+    if status == "succeeded":
+        return "  回调 已发"
+    if status == "pending":
+        return f"  回调 待发（已试 {attempts} 次）" if attempts else "  回调 待发"
+    if status == "failed":
+        return f"  回调 失败（试了 {attempts} 次）"
+    return ""
+
+
+def _api_callbacks(store: Any, account: Any, args: argparse.Namespace) -> int:
+    """配过回调的任务：投递到了哪一步、为什么没发出去。
+
+    手写的地址（特别是打内网的）在**提交时**就被拒了，所以这里看到的都是
+    过了校验的地址。
+    """
+    from agentcode.callbacks import safe_target
+
+    runs = store.callback_runs(account.id, limit=max(1, int(args.limit)))
+    if args.json:
+        print(json.dumps({"callbacks": runs}, ensure_ascii=False))
+        return 0
+    if not runs:
+        print(f"{account.name} 还没有配过回调的 API 任务。")
+        return 0
+    print(f"{account.name} 最近 {len(runs)} 个带回调的任务：")
+    for item in runs:
+        status = str(item.get("callback_status") or "none")
+        mark = {
+            "pending": "待发",
+            "succeeded": "已发",
+            "failed": "失败",
+            "none": "（没配）",
+        }.get(status, status)
+        attempts = int(item.get("callback_attempts") or 0)
+        line = (
+            f"  {item['created_at']}  {item['run_id']}  {mark}"
+            f"  已试 {attempts} 次  {safe_target(str(item.get('callback_url') or ''))}"
+        )
+        if item.get("callback_delivered_at"):
+            line += f"  送达 {item['callback_delivered_at']}"
+        if item.get("callback_next_at"):
+            line += f"  下次 {item['callback_next_at']}"
+        print(line)
+        if item.get("callback_error"):
+            print(f"      最后错误：{item['callback_error']}")
+    print("  重试：网络错误/5xx/429 按退避重试，最多 AGENT_CALLBACK_MAX_ATTEMPTS 次；4xx 直接放弃")
     return 0
 
 

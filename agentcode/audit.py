@@ -46,6 +46,7 @@ BILLING_ORDER = "billing.order"
 BILLING_CONFIRM = "billing.confirm"
 #: 对外 API
 API_RUN = "api.run"
+API_CALLBACK = "api.callback"
 API_TOKEN_CREATE = "api_token.create"
 API_TOKEN_REVOKE = "api_token.revoke"
 #: 运维动作

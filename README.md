@@ -772,6 +772,13 @@ def add(a: str, b: str) -> str:
 | `AGENT_UPLOAD_QUOTA_BYTES` | 否 | `52428800` | 每个用户代码目录的总量上限（50 MB） |
 | `AGENT_METRICS_TOKEN` | 否 | 无 | 抓指标用的令牌；容器里必须绑 0.0.0.0，靠它免登录抓取 |
 | `AGENT_RETENTION_DAYS` | 否 | `0` | 会话与代码文件留多少天；`0` = 不自动清理 |
+| `AGENT_API_ENABLED` | 否 | `true` | 对外 API 开关；`false` 时 `/v1/*` 一律 404 |
+| `AGENT_API_RUNS_DAYS` | 否 | `7` | 对外 API 任务台账保留多少天；`0` = 永久保留 |
+| `AGENT_CALLBACK_SECRET` | 否 | 无 | 任务完成回调的签名密钥；留空回落 `AGENT_SECRET_KEY`，两个都没有则拒收 `callback_url` |
+| `AGENT_CALLBACK_MAX_ATTEMPTS` | 否 | `4` | 一个回调最多投递几次（含首次） |
+| `AGENT_CALLBACK_TIMEOUT` | 否 | `10` | 单次回调投递超时（秒） |
+| `AGENT_CALLBACK_PORTS` | 否 | `80,443` | 允许回调的端口白名单 |
+| `AGENT_CALLBACK_ALLOW_PRIVATE` | 否 | `false` | 允许回调内网/本机地址；只给本地开发与测试 |
 | `AGENT_PRICE_INPUT_PER_MILLION` | 否 | `0` | 模型输入单价（分/百万 token）；0 = 算不了钱 |
 | `AGENT_PRICE_OUTPUT_PER_MILLION` | 否 | `0` | 模型输出单价（分/百万 token）；0 = 算不了钱 |
 | `AGENT_TRACE_DIR` | 否 | `traces` | 轨迹默认输出目录 |
@@ -899,8 +906,8 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 - 后端由服务端决定，调用方不能在请求里挑 `mock` 去拿假答案；
 - 不想对外开放就设 `AGENT_API_ENABLED=false`，`/v1/*` 一律 404。
 
-完整的字段表、错误码、Python / GitHub Actions 示例、以及"现在还没有的"（幂等键、
-异步回调、流式）都写在 **[`docs/api.md`](docs/api.md)** 里。
+完整的字段表、错误码、Python / GitHub Actions 示例、以及"现在还没有的"（流式、
+细分权限）都写在 **[`docs/api.md`](docs/api.md)** 里。
 
 长任务和重试都有对应手段：
 
@@ -908,7 +915,11 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
   （跑完的结果**存在数据库里**，服务重启也取得到；卡死的老任务会被标成失败）；
 - **幂等**：带上 `Idempotency-Key`，同一个键重发只会跑一次、只扣一次费
   （还在跑就返回同一个 `run_id` 让你轮询）；
-- 运维侧查"用户说任务一直没结果"：`agentcode api list <账号>`。
+- **回调**：异步任务多给一个 `callback_url`，跑完主动 POST 结果过去，不用轮询。
+  签名防伪造（HMAC-SHA256）、失败按退避重试且跨重启接着发、地址逐条查内网防 SSRF；
+  投递状态在 `GET /v1/runs/<id>` 的 `callback` 块里，收不到时看
+  `agentcode api callbacks <账号>`（细节见 [`docs/api.md`](docs/api.md) 第 5 节）；
+- 运维侧查"用户说任务一直没结果"：`agentcode api list <账号>`（那一行会标出回调状态）。
 
 ## 备份与恢复
 

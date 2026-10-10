@@ -117,6 +117,27 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def callback_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """回调状态摘要（对外可见）。
+
+    只给主机名，不回显完整地址：回调 URL 的 query 里经常直接放着密钥
+    （``?token=...``），没必要跟着响应到处跑。
+    """
+    url = str(record.get("callback_url") or "")
+    if not url:
+        return {"enabled": False}
+    parts = urlsplit(url)
+    return {
+        "enabled": True,
+        "status": str(record.get("callback_status") or "none"),
+        "host": parts.hostname or "",
+        "attempts": int(record.get("callback_attempts") or 0),
+        "error": str(record.get("callback_error") or ""),
+        "delivered_at": str(record.get("callback_delivered_at") or ""),
+        "next_attempt_at": str(record.get("callback_next_at") or ""),
+    }
+
+
 def safe_upload_name(raw: str) -> str | None:
     """把上传的文件名清洗成一根"光溜溜"的文件名。
 
@@ -914,6 +935,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         session_id = str(payload.get("session_id") or "").strip() or None
         wants_async = bool(payload.get("async"))
         request_key = str(self.headers.get("Idempotency-Key") or "").strip()
+        settings = self._settings()
 
         accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
         allowed, reason = accounts.check_quota(account)
@@ -931,7 +953,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 self._replay_api_run(existing)
                 return
 
-        settings = self._settings()
+        # 任务完成回调：地址先查一遍再收单。收单之后才发现打不出去，等于
+        # 答应了用户一件做不到的事——还白扣了额度。（幂等重发走上面的分支，
+        # 不会被这里再查一次：那一单早就收下了。）
+        callback_url = self._validated_callback_url(payload, settings, wants_async=wants_async)
+        if callback_url is None:
+            return  # 已经回过 400 了
+
         plan = accounts.effective_plan(account)
         settings = scope_settings_for_plan(settings, account.plan)
         settings = settings.apply_overrides(
@@ -959,6 +987,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             token_id=str(token["id"]),
             session_id=session_id or "",
             request_key=request_key,
+            callback_url=callback_url,
         )
         if not created:
             existing = (
@@ -991,18 +1020,20 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 name=f"agentcode-api-{run_id}",
                 daemon=True,
             ).start()
-            self._send_json(
-                {
-                    "run_id": run_id,
-                    "status": "running",
-                    "agent": agent_name,
-                    "session_id": session_id or "",
-                    "poll": f"/v1/runs/{run_id}",
-                    "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
-                    "elapsed_ms": 0,
-                },
-                status=202,
-            )
+            accepted: dict[str, Any] = {
+                "run_id": run_id,
+                "status": "running",
+                "agent": agent_name,
+                "session_id": session_id or "",
+                "poll": f"/v1/runs/{run_id}",
+                "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
+                "elapsed_ms": 0,
+            }
+            if callback_url:
+                accepted["callback"] = callback_summary(
+                    {"callback_url": callback_url, "callback_status": "pending"}
+                )
+            self._send_json(accepted, status=202)
             return
 
         body = self._execute_api_job(**job)
@@ -1010,6 +1041,47 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json(body)
             return
         self._send_json(body, status=502)
+
+    def _validated_callback_url(
+        self, payload: dict[str, Any], settings: Settings, *, wants_async: bool
+    ) -> str | None:
+        """校验回调地址。返回 ``""`` 表示这次请求没有回调，``None`` 表示已经回了 400。
+
+        三件事在这里一次说清：只对异步任务有意义、服务端得签得了名、
+        地址不能打到内网去。**收单之前**说清，比事后发不出去强。
+        """
+        raw = str(payload.get("callback_url") or "").strip()
+        if not raw:
+            return ""
+        if not wants_async:
+            self._send_json(
+                {
+                    "error": "callback_url 只对异步任务有意义：请同时传 \"async\": true。"
+                    "同步请求的响应里已经有结果了。"
+                },
+                status=400,
+            )
+            return None
+        if not (settings.callback_secret or settings.secret_key):
+            self._send_json(
+                {
+                    "error": "服务端没配回调签名密钥（AGENT_CALLBACK_SECRET 或 AGENT_SECRET_KEY），"
+                    "没法给回调签名，所以不能接受 callback_url。"
+                },
+                status=400,
+            )
+            return None
+        from agentcode.callbacks import callback_ports, validate_callback_url
+
+        try:
+            return validate_callback_url(
+                raw,
+                allow_private=settings.callback_allow_private,
+                ports=callback_ports(settings),
+            )
+        except AgentCodeError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return None
 
     def _replay_api_run(self, record: dict[str, Any]) -> None:
         """把同一个幂等键的那一单原样还回去——**不重跑、不重复扣费**。"""
@@ -1020,6 +1092,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "session_id": record["session_id"] or "",
             "idempotent_replay": True,
         }
+        callback = callback_summary(record)
+        if callback.get("enabled"):
+            body["callback"] = callback
         if status == "running":
             # 还在跑：告诉调用方"就是这一单，去轮询"，而不是再开一单
             body.update(
@@ -1181,6 +1256,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             )
         else:
             body["success"] = None
+        callback = callback_summary(record)
+        if callback.get("enabled"):
+            body["callback"] = callback
         self._send_json(body)
 
     def _serve_api_runs(self) -> None:
@@ -1913,6 +1991,31 @@ def serve(
     threading.Thread(
         target=run_alert_loop, args=(monitor,), name="agentcode-alerts", daemon=True
     ).start()
+
+    # 任务完成回调：异步任务跑完后主动通知调用方。投递状态在库里，
+    # 所以这个循环重启之后还能把没发出去的回调接着发。
+    if settings_for_limits.api_enabled:
+        from agentcode.callbacks import run_callback_loop
+
+        threading.Thread(
+            target=run_callback_loop,
+            args=(accounts, settings_for_limits),
+            name="agentcode-callbacks",
+            daemon=True,
+        ).start()
+        has_callback_secret = bool(
+            settings_for_limits.callback_secret or settings_for_limits.secret_key
+        )
+        print(
+            "任务完成回调：已开启"
+            + (
+                "（签名密钥已配置）"
+                if has_callback_secret
+                else "（未配签名密钥，带 callback_url 的请求会被拒绝）"
+            )
+        )
+    else:
+        print("任务完成回调：对外 API 已关闭，不投递回调")
 
     # 数据留存：默认不自动清理（AGENT_RETENTION_DAYS=0），删不删由用户自己决定。
     # 配了就先扫一遍，然后每天扫一次。
