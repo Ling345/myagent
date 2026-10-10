@@ -303,6 +303,30 @@ def _v7_api_runs(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v8_run_callbacks(conn: sqlite3.Connection) -> None:
+    """任务完成回调：把"跑完要通知哪个地址、通知到哪一步了"记在任务台账上。
+
+    不新建一张表，是因为回调与任务是一对一：任务台账里多几列，查状态时
+    不用再拼一次。
+
+    ``callback_next_at`` 是这套东西的关键：投递循环只认"到点了没有"，
+    所以服务重启之后待发的回调不会被忘掉。老记录升级上来时
+    ``callback_status`` 是空（NULL），新记录没有回调时写 ``'none'``——
+    读出来都当"这个任务没有回调"，不区分。
+    """
+    add_column(conn, "api_runs", "callback_url", "TEXT")
+    add_column(conn, "api_runs", "callback_status", "TEXT")
+    add_column(conn, "api_runs", "callback_attempts", "INTEGER")
+    add_column(conn, "api_runs", "callback_error", "TEXT")
+    add_column(conn, "api_runs", "callback_next_at", "TEXT")
+    add_column(conn, "api_runs", "callback_delivered_at", "TEXT")
+    # 投递循环的查询是"哪些到点了"，索引跟着这个条件建
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_runs_callback_due"
+        " ON api_runs(callback_status, callback_next_at)"
+    )
+
+
 #: 迁移按版本号顺序执行；新迁移一律往后追加，绝不改老的
 MIGRATIONS: list[Migration] = [
     Migration(1, "初始结构（accounts / usage）", _v1_initial),
@@ -312,6 +336,7 @@ MIGRATIONS: list[Migration] = [
     Migration(5, "账号邮箱与通知台账", _v5_email_and_notifications),
     Migration(6, "API 令牌", _v6_api_tokens),
     Migration(7, "对外 API 的任务台账与幂等键", _v7_api_runs),
+    Migration(8, "任务完成回调的地址与投递状态", _v8_run_callbacks),
 ]
 
 

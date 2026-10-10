@@ -46,7 +46,7 @@ Authorization: Bearer agk_xxxxxxxxxxxxxxxxxxxxxxxx
 | `max_steps` | 否 | 本轮最多跑几步；不填按服务端配置 |
 | `async` | 否 | `true` 时立刻返回 `202` + `run_id`，任务在后台跑（见第 4 节） |
 
-请求头还可以带一个 **`Idempotency-Key`**（见第 5 节）：网络抖动重发时，
+请求头还可以带一个 **`Idempotency-Key`**（见第 6 节）：网络抖动重发时，
 同一个键只会跑一次、只扣一次费。
 
 ```bash
@@ -120,7 +120,119 @@ curl -sS "$AGENTCODE_URL/v1/runs/9f2c…" -H "Authorization: Bearer $AGENTCODE_T
 - 服务重启或线程意外中断留下的 `running` 记录，会被定期清理标成 `failed`
   并写明原因——不会让你一直轮询一个死任务。
 
-## 5. 幂等键：重发不等于重跑
+轮询是能用，但一直轮询不优雅：不想轮询就配一个 `callback_url`，我们跑完
+主动 POST 给你（第 5 节）。
+
+## 5. 任务完成回调：跑完主动通知你
+
+提交异步任务时多给一个 `callback_url`，任务一结束我们就带着结果 POST 过去，
+调用方"发完就走"：
+
+```bash
+curl -sS -X POST "$AGENTCODE_URL/v1/run" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "coding", "task": "给 utils.py 补测试", "async": true,
+       "callback_url": "https://ci.example.com/hooks/agentcode"}'
+# 202 {"run_id":"9f2c…","status":"running",
+#      "callback":{"enabled":true,"status":"pending","host":"ci.example.com"}}
+```
+
+三条规矩先说清楚：
+
+- **只对异步任务有效**。同步请求的响应里已经有结果了，带 `callback_url` 会回 `400`；
+- **收单之前就校验地址**，不合格直接 `400`——不会"先接单、再发现发不出去、额度还扣了"；
+- **服务端得签得了名**。签名密钥取 `AGENT_CALLBACK_SECRET`，不配则回落
+  `AGENT_SECRET_KEY`；两个都没有时，带 `callback_url` 的请求一律 `400`
+  ——宁可拒收，也不发一条谁都验不了的请求。
+
+### 收到的是什么
+
+一个 `POST`，正文就是 `GET /v1/runs/<run_id>` 那份数据，另加一个事件名：
+
+```json
+{"event": "run.finished", "run_id": "9f2c…", "status": "succeeded", "success": true,
+ "agent": "coding", "task": "给 utils.py 补测试", "session_id": "",
+ "answer": "已生成 tests/test_utils.py，5 项测试全过。", "artifacts": [],
+ "usage": {"total_tokens": 1834, "prompt_tokens": 1502, "completion_tokens": 332},
+ "elapsed_ms": 8421, "error": "",
+ "created_at": "2026-10-10T05:59:57+00:00", "finished_at": "2026-10-10T06:00:05+00:00"}
+```
+
+**成功和失败都会回调**：失败时 `status` 是 `failed`、`success` 是 `false`，
+`error` 写明原因。业务结果以 **body 里的字段**为准，别把响应的 HTTP 状态码
+当结果——我们只是拿它判断"要不要重试"。
+
+两条按 webhook 的通用规矩来：**同一个 `run_id` 的回调可能重复投递**（重试、
+或者同一份数据被两个进程同时捞到），所以请按 `run_id` 做幂等；回调的处理也要
+**先返回再干活**（我们只等 10 秒），慢活请丢进队列。
+
+### 怎么确认这条请求真是我们发的
+
+每一条回调都带三个头：
+
+| 请求头 | 内容 |
+| --- | --- |
+| `X-AgentCode-Signature` | `sha256=<hex>` |
+| `X-AgentCode-Timestamp` | 发出去那一刻的 Unix 秒 |
+| `X-AgentCode-Delivery` | 这次投递对应的 `run_id` |
+
+签名是 HMAC-SHA256，密钥是服务端的回调签名密钥，**签的是 `时间戳 + "." + 原始正文`**：
+
+```python
+import hashlib, hmac
+
+def verify(secret: str, timestamp: str, body: bytes, signature: str) -> bool:
+    expected = hmac.new(
+        secret.encode("utf-8"), f"{timestamp}.".encode("utf-8") + body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, "sha256=" + expected)
+```
+
+请**先验签，再信里面任何一个字**，并且顺手检查时间戳（比如差超过 5 分钟就拒）——
+不然一条被录下来的合法请求可以被无限重放。请求头名字不区分大小写（HTTP 本来就这样）。
+
+### 发不出去怎么办
+
+| 情况 | 我们怎么做 |
+| --- | --- |
+| 2xx | 记成功，收工 |
+| 网络错误 / 超时 / 5xx / 429 / 408 | 退避重试：5 秒 → 30 秒 → 2 分钟 → 10 分钟，最多 4 次（`AGENT_CALLBACK_MAX_ATTEMPTS`） |
+| 其它 4xx / 3xx | 视为永久失败，不再重试（不跟随重定向） |
+| 重试次数用完 | 状态记 `failed`，最后一次的错误写进台账 |
+
+投递状态**存在数据库里**，所以重试会跨服务重启接着做（不是内存里的一次性尝试）；
+每次投递也进审计：`agentcode audit list --action-prefix api.`（审计里只记主机名，
+不记完整地址——很多 webhook 的密钥就藏在路径或 query 里）。
+
+查回调状态：
+
+```bash
+# 单个任务：多一个 callback 块
+curl -sS "$AGENTCODE_URL/v1/runs/9f2c…" -H "Authorization: Bearer $AGENTCODE_TOKEN"
+# "callback": {"enabled": true, "status": "succeeded", "host": "ci.example.com",
+#              "attempts": 1, "error": "", "delivered_at": "2026-10-10T06:00:05+00:00",
+#              "next_attempt_at": ""}
+
+# 运营侧：某个账号回调投递到了哪一步（"我没收到回调"时先看这个）
+D:\Anaconda\python.exe -m agentcode api callbacks alice
+```
+
+### 我们怎么防 SSRF
+
+地址是你给的，照着发就等于把我们变成你的内网探针（`http://169.254.169.254/`
+这种能把云主机的凭据读出来）。所以：
+
+- 只允许 `http` / `https`，地址里不许带用户名密码；
+- 端口默认只放 `80` / `443`，要放别的得服务端配 `AGENT_CALLBACK_PORTS`；
+- 域名会解析出来**逐条检查**，只有全部是公网地址才放行（解析到内网/回环/链路本地一律拒）；
+- 提交时查一次、投递前再查一次（域名解析结果会变）；
+- 不跟随重定向、不走系统代理、10 秒超时、不读响应正文。
+
+本地开发要回调自己机器上的接收端时，把 `AGENT_CALLBACK_ALLOW_PRIVATE=true` 打开。
+**公网部署别开**。
+
+## 6. 幂等键：重发不等于重跑
 
 客户端超时之后最常见的做法是"原样重发一次"。带 `Idempotency-Key` 就不会变成
 "跑两次、扣两次"：
@@ -143,18 +255,18 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 键由你自己定，建议带上业务上下文（比如 CI 的 run id）。**不要**用随机数——
 那就等于没带。同一个键最多保留 `AGENT_API_RUNS_DAYS` 天。
 
-## 6. 错误码
+## 7. 错误码
 
 | 状态码 | 什么意思 | 该怎么办 |
 | --- | --- | --- |
-| `400` | 请求不合法（`task` 空、`agent` 不存在） | 改请求；错误信息会写清楚 |
+| `400` | 请求不合法（`task` 空、`agent` 不存在、`callback_url` 不合格） | 改请求；错误信息会写清楚 |
 | `401` | 令牌无效/过期/被吊销 | 换一把；账号被停用也会是 401 |
 | `402` | 今天的额度用完了 | 等 UTC 零点重置，或升级套餐 |
 | `404` | 服务端关掉了对外 API（`AGENT_API_ENABLED=false`） | 找运营方 |
 | `429` | 请求太频 / 并发太多 | 退避重试；响应里有 `Retry-After` |
 | `502` | 任务没跑成功（模型侧错误、超出单次预算等） | 看 `error` 字段；可以重试 |
 
-## 7. 限流与计费
+## 8. 限流与计费
 
 - **计费**：按这次运行真实消耗的 token 记账，输入/输出分开记（两者单价差好几倍）。
   和网页、CLI 走的是**同一本账**——`agentcode billing costs` 里能一起看到。
@@ -163,7 +275,7 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 - **上限**：每日 token 额度、每分钟请求数、并发数、单次运行 token 预算，
   都在服务端 `.env` 里配（见 `README.md` 的「配置说明」）。
 
-## 8. 脚本示例
+## 9. 脚本示例
 
 ### Python
 
@@ -207,7 +319,7 @@ print(data["answer"], data["usage"])
 
 令牌放进仓库的 **Secrets**，不要写进 workflow 文件。
 
-## 9. 安全
+## 10. 安全
 
 - 令牌等同密码：**只放环境变量或 secret**，不要提交进仓库、不要贴进聊天记录。
 - 泄露了就**立刻吊销**（网页「我的数据」或 `agentcode token revoke`），
@@ -217,11 +329,10 @@ print(data["answer"], data["usage"])
   （`agentcode audit list --action-prefix api.`）。审计里永远没有令牌明文。
 - 对外提供服务时请务必用 **HTTPS**：明文 HTTP 会让令牌在网络里裸奔。
 
-## 10. 现在还没有的（诚实列一下）
+## 11. 现在还没有的（诚实列一下）
 
 | 缺什么 | 影响 |
 | --- | --- |
-| 任务完成的回调 | 异步任务要自己轮询（`GET /v1/runs/<id>`）；我们不会主动通知你的服务 |
 | 流式接口 | 网页有 SSE，对外还没开；需要边跑边看的话请提需求 |
 | 按接口细分的权限 | 一把令牌能调全部接口；要"只读令牌"之类的还得再做 |
 

@@ -247,3 +247,6 @@ SANDBOX_RUNS = METRICS.counter("agentcode_sandbox_runs_total", "沙箱执行次�
 SANDBOX_SECONDS = METRICS.histogram("agentcode_sandbox_seconds", "沙箱执行耗时（秒）")
 REJECTIONS = METRICS.counter("agentcode_rejections_total", "被拒绝的请求，按原因")
 ALERTS = METRICS.counter("agentcode_alerts_total", "触发的告警次数，按规则")
+CALLBACKS = METRICS.counter(
+    "agentcode_callbacks_total", "任务完成回调的投递次数，按结果（ok/retry/failed）"
+)
