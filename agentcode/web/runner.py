@@ -22,7 +22,7 @@ from agentcode.core.context import RunContext
 from agentcode.core.errors import AgentCodeError
 from agentcode.core.registry import default_registry
 from agentcode.llm.mock import demo_responses_llm
-from agentcode.llm.openai_compatible import OpenAICompatibleLLM
+from agentcode.llm.routing import build_llm_for_agent
 from agentcode.memory import ShortTermMemory
 from agentcode.middleware import BudgetMiddleware, RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
@@ -153,7 +153,8 @@ def create_backend(
         tools = build_tools(mock=True)
     else:
         settings.validate()
-        llm = OpenAICompatibleLLM.from_settings(settings)
+        # 配了多模型档位就按智能体选档位（含降级链），没配就是原来的单模型
+        llm = build_llm_for_agent(settings, agent=agent_name)
         tools = build_tools(mock=False, settings=settings, agent_name=agent_name)
 
     return default_registry.create(

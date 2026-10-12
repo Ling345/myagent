@@ -209,7 +209,15 @@ class BaseAgent(ABC):
         error: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> AgentResult:
-        """把上下文整理成对外的运行结果。"""
+        """把上下文整理成对外的运行结果。
+
+        用了多模型档位时，顺手记下"这次是谁答的"——出了问题（答得不好、
+        费用不对）第一个要问的就是它。
+        """
+        payload = dict(extra or {})
+        profile = str(getattr(self.llm, "used_profile", "") or "")
+        if profile:
+            payload.setdefault("model_profile", profile)
         return AgentResult(
             agent=self.name,
             task=task,
@@ -219,5 +227,5 @@ class BaseAgent(ABC):
             error=error,
             duration_ms=ctx.elapsed_ms(),
             usage=ctx.usage,
-            extra=dict(extra or {}),
+            extra=payload,
         )

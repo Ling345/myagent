@@ -18,9 +18,9 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 本地路径 | `D:\agent\agentcode-homework1` |
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v8**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
-| 代码量 | `agentcode/` 约 1.27 万行 Python；74 个测试文件 |
-| 测试 | **908 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
-| 提交 | 92 次；PR #1–#17 与 #18 已合并（#2 是重复提交，已关闭未合并） |
+| 代码量 | `agentcode/` 约 1.31 万行 Python；75 个测试文件 |
+| 测试 | **934 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
+| 提交 | 93 次；PR #1–#17、#18、#19 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -43,6 +43,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | `web/server.py` | HTTP 服务：网页 API、静态资源、`/v1/*` 对外 API、鉴权与限流 | 接口 |
 | `callbacks.py` | 任务完成回调：地址校验（防 SSRF）、HMAC 签名、投递与退避重试 | 回调相关 |
 | `llm/structured.py` | 结构化输出：要 JSON、校验必填与类型、不合格把问题回给模型重试一次 | 要模型"判断一下"的地方 |
+| `llm/routing.py` | 多模型档位：按智能体选档位、整体挂了按 fallback 降级、记"谁答的" | 加档位/改降级策略 |
 | `web/runner.py` | 把一次 agent 运行变成事件流（status/step/answer/error），sync 与 async 共用 | 运行链路 |
 | `web/sessions.py` | 会话仓库（按账号分目录、磁盘持久化、回收站软删除） | 会话 |
 | `web/static/` | `index.html` / `app.js` / `style.css`（浅蓝流动背景、面板式侧栏） | 界面 |
@@ -68,6 +69,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | #16 | 更新接续说明里的快照数字（827 项用例 / 85 次提交 / PR 到 #15） |
 | #17 | 任务完成回调：签名 + 失败重试 + 防 SSRF（迁移 v8，`docs/api.md` 第 5 节） |
 | #18 | 原生工具调用（JSON Schema + `tool_calls`）+ 结构化输出（`llm/structured.py`），带自动回退 |
+| #19 | 多模型档位与跨供应商降级（`llm/routing.py`、`configs/models.example.json`） |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
@@ -81,6 +83,13 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
   - 服务商不认 `tools` 参数时自动回退文本协议（打印提示 + `mode=fallback` 指标）。
 - **结构化输出**：`llm/structured.py` 的 `ask_json()`——要求模型回 JSON、校验必填与
   类型、不合格把问题回给模型重试一次；规划器先用它，拿不到合格 JSON 退回文本解析。
+- **多模型档位**（`llm/routing.py`，配置文件模板 `configs/models.example.json`）：
+  `AGENT_MODEL_PROFILES_FILE` 指向一个 JSON，里面写"档位 → 模型 / base_url /
+  api_key_env / fallback"；选档顺序 `--model-profile` > `by_agent` > `default` >
+  文件里第一个写的；某一档整体挂了按 fallback 换下一档（可重试的错先退避 1 秒），
+  **一次运行内不回头**，结果里 `extra.model_profile` 写明"这次谁答的"；
+  没配档位就完全走老路（单模型 + key 池）。指标：`agentcode_model_used_total{profile}`、
+  `agentcode_model_fallback_total{from,to}`。
 - 指标：`agentcode_tool_calling_total{mode=native|text|fallback}`。
 
 ## 4. 对外 API 现状（`docs/api.md` 是用户文档）
@@ -106,9 +115,10 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 真支付接入 | 订单现在是人工确认（`billing confirm`） | 与定价策略相关，用户之前说先放一放 |
 | 团队协作 | `team` 套餐目前只是额度更大，没有成员管理 | 卖团队客户时迟早要有 |
 | ICP 备案 / 数据出境评估 | 合规前置条件 | 非代码事项，见 `docs/data-and-privacy.md` |
-| 多模型路由 / 跨供应商降级 / prompt cache | 便宜模型跑工具轮、贵模型做决策；直接决定毛利与可用性 | 现在只有"同一家的多把 key 轮换熔断" |
-| 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
+| prompt cache（让提示词前缀稳定） | 供应商侧的缓存要"前缀不变"才命中；现在提示词把变化的部分放在前面 | 只碰 `agents/prompts.py`，单独一个 PR 做 |
 | 对外流式（SSE / OpenAI 兼容） | 客户端与 IDE 接入的门槛项 | 网页有 SSE，`/v1/*` 没有 |
+| 多模态输入（图片/PDF） | 现在只收文本、单文件 2 MB | 有"看图"需求再做 |
+| 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
 | MCP（接别人的工具 + 把自己暴露成 MCP server） | 工具生态入口，一次投入长期受益 | 工具现在写死在 `tools/` |
 | 运行追踪 UI（时间线 / 每步 token / 重放） | 已有 JSON 与事件流，只差画出来；演示价值高 | 现在只有 CLI + `/metrics` |
 | 评测与回归（黄金集 + LLM-as-judge） | "敢改提示词"的前提 | 现在没有 eval 工具 |
@@ -130,7 +140,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 # 测试与服务
 D:\Anaconda\python.exe -m pytest -q
 D:\Anaconda\python.exe -m agentcode open                    # 起网页（本机 8000）
-D:\Anaconda\python.exe -m agentcode config                  # 看配置（密钥脱敏）
+D:\Anaconda\python.exe -m agentcode config                  # 看配置（密钥脱敏）与多模型档位摘要
 
 # 运营
 D:\Anaconda\python.exe -m agentcode user list
@@ -177,6 +187,15 @@ launch_chrome_cdp.ps1 + verify_*.mjs（真浏览器验证）
   要更严的 JSON Schema，得自己扩（或引依赖，但项目约定是标准库优先）。
 - **`ask_json` 要传带中间件的调用**：给 LLM 对象也行，但智能体里应该传
   `lambda messages: self._think_reply(messages, ctx)`，否则用量/预算/重试都不在链上。
+- **档位里的 `api_key_env` 是用户自己起的名字**（例如 `LLM_API_KEY_CHEAP`）：
+  取值要用 `Settings.profile_env()`（`.env` 里的值 + 进程环境），**只看 `os.environ`
+  会取不到**——框架是自己解析 `.env` 的，从不往 `os.environ` 里写。
+- **降级是"一次运行内粘住"的**：降级之后同一份运行不再回头试原来的档位，
+  跨运行才重置。所以看到"这次用了 cheap"要结合 `traces` 里的运行记录一起看。
+- **配了档位就一定包一层 `RoutedLLM`**（哪怕只有一档）：为了记录
+  `extra.model_profile`；单档时的额外开销只是一次函数调用。
+- **没配 `default` 时按配置文件里的书写顺序取第一个档位**，不是按名字排序
+  ——否则 `strong`/`cheap` 这种命名会让"便宜的那个"意外变成默认。
 
 ## 9. 这个项目的约定（别破坏）
 

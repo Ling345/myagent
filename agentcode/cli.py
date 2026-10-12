@@ -20,7 +20,7 @@ from agentcode.core.errors import AgentCodeError, AgentNotFoundError, ConfigErro
 from agentcode.core.registry import default_registry
 from agentcode.core.result import AgentResult
 from agentcode.llm.mock import demo_responses_llm
-from agentcode.llm.openai_compatible import OpenAICompatibleLLM
+from agentcode.llm.routing import build_llm_for_agent
 from agentcode.memory import FileSessionStore, JsonStore, ShortTermMemory
 from agentcode.memory.session_store import DEFAULT_SESSION_DIR
 from agentcode.middleware import (
@@ -96,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="模型后端；mock 为离线演示，不消耗额度",
     )
     run_parser.add_argument("--max-steps", type=int, default=None, help="覆盖最大步数")
+    run_parser.add_argument(
+        "--model-profile",
+        default=None,
+        help="用哪个模型档位（配了 AGENT_MODEL_PROFILES_FILE 才有意义）",
+    )
     run_parser.add_argument(
         "--memory-turns", type=int, default=None, help="上下文记忆保留几轮，默认取配置"
     )
@@ -842,7 +847,9 @@ def _run_command(args: argparse.Namespace) -> int:
         tools = _build_tools(mock=True, settings=settings, agent_name=agent_name)
     else:
         settings.validate()
-        llm = OpenAICompatibleLLM.from_settings(settings)
+        llm = build_llm_for_agent(
+            settings, agent=agent_name, explicit=getattr(args, "model_profile", None)
+        )
         tools = _build_tools(
             mock=False,
             settings=settings,
@@ -1480,7 +1487,9 @@ def _make_testgen_runner(settings: Settings, args: argparse.Namespace):
             llm = demo_responses_llm("test_gen")
             tools = _build_tools(mock=True, settings=settings, agent_name="test_gen")
         else:
-            llm = OpenAICompatibleLLM.from_settings(settings)
+            llm = build_llm_for_agent(
+                settings, agent="test_gen", explicit=getattr(args, "model_profile", None)
+            )
             tools = _build_tools(
                 mock=False, settings=settings, agent_name="test_gen", allow_code=True
             )

@@ -1,0 +1,27 @@
+{
+  "default": "strong",
+  "profiles": {
+    "strong": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "LLM_API_KEY",
+      "fallback": ["cheap"]
+    },
+    "cheap": {
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "LLM_API_KEY_CHEAP",
+      "timeout": 30,
+      "fallback": ["local"]
+    },
+    "local": {
+      "model": "qwen2.5:7b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": "LLM_API_KEY_LOCAL"
+    }
+  },
+  "by_agent": {
+    "echo": "cheap",
+    "test_gen": "cheap"
+  }
+}
