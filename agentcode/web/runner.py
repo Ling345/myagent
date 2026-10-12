@@ -26,6 +26,7 @@ from agentcode.llm.openai_compatible import OpenAICompatibleLLM
 from agentcode.memory import ShortTermMemory
 from agentcode.middleware import BudgetMiddleware, RetryMiddleware, TimeoutMiddleware
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
+from agentcode.llm.base import LLMReply
 from agentcode.tools import (
     ToolRegistry,
     register_builtin_tools,
@@ -78,7 +79,7 @@ class EventMiddleware(Middleware):
         self._emit = emit
 
     def wrap_llm(self, call: LLMCall, ctx: RunContext) -> LLMCall:
-        def wrapped(messages: Sequence[Any]) -> str:
+        def wrapped(messages: Sequence[Any]) -> LLMReply:
             self._emit({"type": "status", "data": {"message": "正在调用模型…"}})
             return call(messages)
 
