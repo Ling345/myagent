@@ -250,3 +250,6 @@ ALERTS = METRICS.counter("agentcode_alerts_total", "触发的告警次数，按�
 CALLBACKS = METRICS.counter(
     "agentcode_callbacks_total", "任务完成回调的投递次数，按结果（ok/retry/failed）"
 )
+TOOL_CALLING = METRICS.counter(
+    "agentcode_tool_calling_total", "工具调用的走法，按模式（native/text/fallback）"
+)

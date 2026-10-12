@@ -657,6 +657,23 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
 | `启动网页.cmd` | 双击启动服务并打开浏览器 |
 | `tests/` | 全离线单元测试 |
 
+### 工具调用：原生 tool_calls 与文本协议
+
+工具有两条调用路径，行为一致，区别只在"怎么把工具交给模型"：
+
+| 模式 | 怎么工作 | 什么时候用 |
+| --- | --- | --- |
+| `native`（原生） | 按 OpenAI 协议把工具的 JSON Schema 放进请求，模型回 `tool_calls`，参数是 JSON；工具结果以 `role="tool"` 的消息喂回去；收尾用一个 `finish` 工具 | 后端支持工具调用时（DeepSeek、通义、vLLM 等基本都支持） |
+| `text`（文本协议） | 提示词里写清 `工具名[输入]` 格式，模型按格式输出，我们自己解析，观察结果拼进下一次提示 | 后端不支持工具调用时；离线脚本模型走的就是这条 |
+
+由 `AGENT_TOOL_CALLING` 控制，默认 `auto`：后端支持就用原生，**服务商不认 `tools`
+参数时自动退回文本协议**（打印一行提示，并记一条 `agentcode_tool_calling_total{mode="fallback"}` 指标），
+所以换个模型不会把任务做死。想锁定某一条：`AGENT_TOOL_CALLING=native` 或 `=text`。
+
+另外，需要"让模型判断一下"的地方（例如规划出步骤列表）走的是**结构化输出**：
+要求模型回一段 JSON（`agentcode/llm/structured.py`），校验必填字段与类型，
+不合格就把问题回给模型重试一次；拿不到合格 JSON 时退回按文本解析。
+
 ## 三种范式的示例输出
 
 命令行会打印完整轨迹（终端本来就是给开发者看的），网页只给结果。
@@ -749,6 +766,7 @@ def add(a: str, b: str) -> str:
 | `SERPAPI_API_KEY` | 否 | 无 | 网页搜索工具密钥 |
 | `AGENT_MAX_STEPS` | 否 | `6` | 闲聊类智能体的最大步数 |
 | `AGENT_CODING_STEPS` | 否 | `20` | coding 智能体的最大步数 |
+| `AGENT_TOOL_CALLING` | 否 | `auto` | 工具调用模式：`auto` / `native`（原生 tool_calls）/ `text`（文本协议） |
 | `AGENT_MEMORY_TURNS` | 否 | `5` | 每个会话记住几轮上下文 |
 | `AGENT_MAX_SESSIONS` | 否 | `20` | 网页同时保留多少个会话 |
 | `AGENT_WEB_SESSION_DIR` | 否 | `traces/web-sessions` | 网页会话（名字 + 完整记录）落盘目录 |

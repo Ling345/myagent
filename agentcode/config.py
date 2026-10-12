@@ -93,6 +93,8 @@ DEFAULT_NOTIFY_WEBHOOK = ""
 #: 对外开放 API（POST /v1/run）：令牌必须由用户自己生成，所以默认开着也不会被白用；
 #: 要彻底关掉（比如不想让外部流量打到这个实例）就设 false
 DEFAULT_API_ENABLED = True
+#: 工具调用模式：auto = 后端支持就用原生工具调用、不支持就退回文本协议
+DEFAULT_TOOL_CALLING = "auto"
 #: 对外 API 的任务台账保留多少天（异步任务的结果要留着给调用方取）
 DEFAULT_API_RUNS_DAYS = 7
 #: 任务完成回调：签名密钥留空则回落 AGENT_SECRET_KEY；重试次数、超时、端口白名单
@@ -226,6 +228,8 @@ class Settings:
     notify_webhook: str = DEFAULT_NOTIFY_WEBHOOK
     #: 对外开放 API：false 时 /v1/* 一律 404
     api_enabled: bool = DEFAULT_API_ENABLED
+    #: 工具调用模式：auto / native / text（见 agentcode.core.agent.TOOL_CALLING_MODES）
+    tool_calling: str = DEFAULT_TOOL_CALLING
     #: 对外 API 的任务台账保留多少天；0 = 永久保留
     api_runs_days: int = DEFAULT_API_RUNS_DAYS
     #: 任务完成回调的签名密钥；留空回落 AGENT_SECRET_KEY（两个都没有就拒收 callback_url）
@@ -364,6 +368,9 @@ class Settings:
             trash_days=_to_int(pick("AGENT_TRASH_DAYS"), DEFAULT_TRASH_DAYS),
             notify_webhook=str(pick("AGENT_NOTIFY_WEBHOOK", DEFAULT_NOTIFY_WEBHOOK) or ""),
             api_enabled=_to_bool(pick("AGENT_API_ENABLED"), DEFAULT_API_ENABLED),
+            tool_calling=str(
+                pick("AGENT_TOOL_CALLING", DEFAULT_TOOL_CALLING) or DEFAULT_TOOL_CALLING
+            ).strip().lower(),
             api_runs_days=_to_int(pick("AGENT_API_RUNS_DAYS"), DEFAULT_API_RUNS_DAYS),
             callback_secret=pick("AGENT_CALLBACK_SECRET"),
             callback_max_attempts=_to_int(
@@ -460,6 +467,11 @@ class Settings:
             raise ConfigError(
                 f"AGENT_EXECUTION_BACKEND 只支持 local 或 docker，当前是：{self.execution_backend}。"
             )
+        if self.tool_calling not in {"auto", "native", "text"}:
+            raise ConfigError(
+                "AGENT_TOOL_CALLING 只支持 auto / native / text，"
+                f"当前是：{self.tool_calling}。"
+            )
         # 自动备份只在配了目录时才有意义；配了就要求其余参数能真正生效，
         # 否则会出现"以为在备份，其实一次都没备"——那比不备份更危险
         if self.backup_dir:
@@ -524,6 +536,11 @@ class Settings:
             + ("（不自动清理）" if self.trash_days <= 0 else ""),
             "AGENT_NOTIFY_WEBHOOK": mask_secret(self.notify_webhook),
             "AGENT_API_ENABLED": "是" if self.api_enabled else "否（/v1/* 关闭）",
+            "AGENT_TOOL_CALLING": {
+                "auto": "自动（后端支持就用原生工具调用，否则用文本协议）",
+                "native": "强制原生工具调用",
+                "text": "强制文本协议",
+            }.get(self.tool_calling, self.tool_calling),
             "AGENT_API_RUNS_DAYS": str(self.api_runs_days)
             + ("（永久保留）" if self.api_runs_days <= 0 else ""),
             # 回调的签名密钥按密钥处理：它能让攻击者伪造回调

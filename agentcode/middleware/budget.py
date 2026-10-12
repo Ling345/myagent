@@ -6,7 +6,7 @@ from typing import Sequence
 
 from agentcode.core.context import RunContext
 from agentcode.core.errors import AgentCodeError
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 
 
@@ -26,7 +26,7 @@ class BudgetMiddleware(Middleware):
     def wrap_llm(self, call: LLMCall, ctx: RunContext) -> LLMCall:
         """调用返回后检查是否超预算。"""
 
-        def wrapped(messages: Sequence[Message]) -> str:
+        def wrapped(messages: Sequence[Message]) -> LLMReply:
             reply = call(messages)
             used = ctx.usage.total_tokens
             if used > self.max_tokens:

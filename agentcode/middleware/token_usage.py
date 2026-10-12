@@ -6,7 +6,7 @@ from typing import Sequence
 
 from agentcode.core.context import RunContext
 from agentcode.core.result import TokenUsage
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 
 
@@ -22,7 +22,7 @@ class TokenUsageMiddleware(Middleware):
     def wrap_llm(self, call: LLMCall, ctx: RunContext) -> LLMCall:
         """调用前后对比上下文用量，得到本次调用的增量。"""
 
-        def wrapped(messages: Sequence[Message]) -> str:
+        def wrapped(messages: Sequence[Message]) -> LLMReply:
             before = (
                 ctx.usage.prompt_tokens,
                 ctx.usage.completion_tokens,

@@ -9,9 +9,10 @@ from __future__ import annotations
 from typing import Any, Callable, Sequence
 
 from agentcode.core.context import RunContext
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
 
-LLMCall = Callable[[Sequence[Message]], str]
+#: 模型调用：返回完整回复（文本 + 可能的工具调用）
+LLMCall = Callable[[Sequence[Message]], LLMReply]
 ToolCall = Callable[[str, str], str]
 
 
