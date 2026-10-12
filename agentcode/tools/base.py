@@ -11,15 +11,20 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from agentcode.core.errors import ToolError
 
 #: 引号内允许还原的转义序列
 _ESCAPE_MAP = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "'": "'", "\\": "\\"}
 _ESCAPE_PATTERN = re.compile(r"\\(.)", re.DOTALL)
+
+#: 原生工具调用里用来"交最终答案"的保留工具名
+FINISH_TOOL_NAME = "finish"
+FINISH_TOOL_DESCRIPTION = "任务完成后用它提交最终答案；答案要给用户看，别写推理过程。"
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,34 @@ class ToolSpec:
             "name": self.name,
             "description": self.description,
             "parameters": dict(self.parameters),
+        }
+
+    def json_schema(self) -> dict[str, Any]:
+        """转成给模型看的 JSON Schema。
+
+        我们现有的工具参数都是"名字 + 中文说明"的字符串形式，所以这里统一
+        按字符串类型生成，并且**全部标为必填**：真实的可选性写在参数说明里
+        （例如"可选，超时秒数"）。等哪天参数需要类型化，再扩展 ``parameters``。
+        """
+        properties = {
+            name: {"type": "string", "description": description}
+            for name, description in self.parameters.items()
+        }
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": list(self.parameters),
+        }
+
+    def openai_tool(self) -> dict[str, Any]:
+        """按 OpenAI 的 ``tools`` 格式描述这个工具。"""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.json_schema(),
+            },
         }
 
 
@@ -199,6 +232,9 @@ class ToolRegistry:
         """返回全部工具名称。"""
         return list(self._tools)
 
+    def __len__(self) -> int:
+        return len(self._tools)
+
     def describe(self) -> str:
         """生成供提示词使用的工具清单。"""
         if not self._tools:
@@ -207,6 +243,30 @@ class ToolRegistry:
             f"- {spec.name}: {spec.description}（参数：{spec.signature_hint()}）"
             for spec in self._tools.values()
         )
+
+    def json_schemas(self) -> list[dict[str, Any]]:
+        """生成原生工具调用的 ``tools`` 列表（末尾附一个 finish）。"""
+        schemas = [spec.openai_tool() for spec in self._tools.values()]
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": FINISH_TOOL_NAME,
+                    "description": FINISH_TOOL_DESCRIPTION,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {
+                                "type": "string",
+                                "description": "给用户的最终答案",
+                            }
+                        },
+                        "required": ["answer"],
+                    },
+                },
+            }
+        )
+        return schemas
 
     # ------------------------------------------------------------------ 调用
 
@@ -232,6 +292,35 @@ class ToolRegistry:
         args, kwargs = self._build_call(spec, raw_input)
         try:
             result = spec.func(*args, **kwargs)
+        except TypeError as exc:
+            return f"错误：工具 '{name}' 参数不匹配（{exc}）。"
+        except Exception as exc:  # noqa: BLE001 - 工具异常一律转为可读信息
+            return f"错误：工具 '{name}' 执行失败：{exc}"
+        return result if isinstance(result, str) else str(result)
+
+    def invoke_json(self, name: str, arguments: str = "{}") -> str:
+        """按原生工具调用的 JSON 参数执行工具。
+
+        和 :meth:`invoke` 的区别只在"参数从哪来"：一个是模型写的``工具名[x=y]``
+        文本，一个是模型给的 JSON 对象。错误同样转成中文可读字符串，
+        让智能体循环能把它当成 Observation 继续推理。
+        """
+        spec = self.get(name)
+        if spec is None:
+            available = "、".join(self._tools) or "无"
+            return f"错误：未注册的工具 '{name}'。可用工具：{available}。"
+        text = (arguments or "").strip()
+        kwargs: dict[str, Any] = {}
+        if text:
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError) as exc:
+                return f"错误：工具 '{name}' 的参数不是合法的 JSON（{exc}）。"
+            if not isinstance(parsed, Mapping):
+                return f"错误：工具 '{name}' 的参数必须是 JSON 对象。"
+            kwargs = dict(parsed)
+        try:
+            result = spec.func(**kwargs)
         except TypeError as exc:
             return f"错误：工具 '{name}' 参数不匹配（{exc}）。"
         except Exception as exc:  # noqa: BLE001 - 工具异常一律转为可读信息

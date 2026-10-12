@@ -161,6 +161,7 @@ def create_backend(
         tools=tools,
         memory=ShortTermMemory(max_turns=settings.memory_turns),
         max_steps=max_steps or settings.max_steps_for(agent_name),
+        tool_calling=settings.tool_calling,
     )
 
 

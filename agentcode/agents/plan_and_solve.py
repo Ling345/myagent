@@ -11,23 +11,59 @@ from agentcode.core.errors import LLMError
 from agentcode.core.parsing import parse_plan
 from agentcode.core.registry import register_agent
 from agentcode.core.result import AgentResult, Step
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
+from agentcode.llm.structured import PLAN_SCHEMA, ask_json
 
 #: 「调用模型并累计用量」的函数签名，由 BaseAgent._think 提供
 ThinkFn = Callable[[Sequence[Message], RunContext], str]
+#: 「调用模型并拿回完整回复」的函数签名，由 BaseAgent._think_reply 提供
+CompleteFn = Callable[[Sequence[Message]], LLMReply]
+
+#: 第一次没拿到合格 JSON 时，追一句纠正说明再问一次
+_PLAN_RETRY_HINT = """
+
+# 请注意
+上一次的回答不合要求。请只输出一个 JSON 对象，形如：
+{{"steps": ["步骤一", "步骤二"]}}
+不要解释、不要用代码围栏包住整段回答。"""
 
 
 class Planner:
     """把复杂问题拆解为有序步骤。"""
 
-    def __init__(self, think: ThinkFn) -> None:
+    def __init__(self, think: ThinkFn, complete: CompleteFn | None = None) -> None:
         self._think = think
+        self._complete = complete
 
     def plan(self, question: str, ctx: RunContext, history: str) -> list[str]:
-        """生成行动计划；解析失败时返回空列表。"""
+        """生成行动计划；解析失败时返回空列表。
+
+        先按"回一段 JSON"要（结构化更稳）：合格就用；不合格但能按老格式解析出来
+        （离线脚本模型、老提示词）也直接用，不再多花一次调用；两边都不行才
+        带着问题再问一次。
+        """
         prompt = PLANNER_PROMPT_TEMPLATE.format(question=question, history=history)
+        if self._complete is not None:
+            steps = self._try_structured([{"role": "user", "content": prompt}])
+            if steps:
+                return steps
+            retry_messages = [{"role": "user", "content": prompt + _PLAN_RETRY_HINT}]
+            if self._complete is not None:
+                return self._try_structured(retry_messages)
         raw = self._think([{"role": "user", "content": prompt}], ctx)
         return parse_plan(raw)
+
+    def _try_structured(self, messages: Sequence[Message]) -> list[str]:
+        """问一次结构化计划：JSON 优先，老格式兜底。"""
+        assert self._complete is not None
+        answer = ask_json(self._complete, messages, PLAN_SCHEMA, retries=0)
+        if answer.payload is not None:
+            steps = [
+                str(item).strip() for item in answer.payload.get("steps", []) if str(item).strip()
+            ]
+            if steps:
+                return steps
+        return parse_plan(answer.text)
 
 
 class Executor:
@@ -74,8 +110,9 @@ class PlanAndSolveAgent(BaseAgent):
         """先规划再执行。"""
         ctx = context or self._new_context(task)
         history = self._history_text()
+        planner = Planner(self._think, lambda messages: self._think_reply(messages, ctx))
         try:
-            plan = Planner(self._think).plan(task, ctx, history)
+            plan = planner.plan(task, ctx, history)
         except LLMError as exc:
             return self._build_result(task, "", ctx, success=False, error=f"调用模型失败：{exc}")
 

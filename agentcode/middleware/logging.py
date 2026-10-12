@@ -6,7 +6,7 @@ import sys
 from typing import Sequence, TextIO
 
 from agentcode.core.context import RunContext
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 
 _MAX_PREVIEW = 60
@@ -41,12 +41,16 @@ class LoggingMiddleware(Middleware):
     def wrap_llm(self, call: LLMCall, ctx: RunContext) -> LLMCall:
         """记录一次模型调用。"""
 
-        def wrapped(messages: Sequence[Message]) -> str:
+        def wrapped(messages: Sequence[Message]) -> LLMReply:
             last = messages[-1].get("content", "") if messages else ""
             self.llm_calls += 1
             self._emit(f"调用模型（第 {self.llm_calls} 次请求），输入预览：{_preview(last)}")
             reply = call(messages)
-            self._emit(f"模型返回：{_preview(reply)}")
+            if getattr(reply, "tool_calls", None):
+                names = "、".join(call_item.name for call_item in reply.tool_calls)
+                self._emit(f"模型要求调用工具：{names}")
+            else:
+                self._emit(f"模型返回：{_preview(getattr(reply, 'text', reply))}")
             return reply
 
         return wrapped

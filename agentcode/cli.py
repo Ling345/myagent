@@ -857,6 +857,7 @@ def _run_command(args: argparse.Namespace) -> int:
         middlewares=_build_middlewares(settings, quiet=args.quiet),
         max_steps=settings.max_steps_for(agent_name),
         memory=memory,
+        tool_calling=settings.tool_calling,
     )
     if session_store and len(agent.memory):
         print(f"已载入会话「{session_name}」的 {len(agent.memory)} 轮上下文。")
@@ -1490,6 +1491,7 @@ def _make_testgen_runner(settings: Settings, args: argparse.Namespace):
             middlewares=_build_middlewares(settings, quiet=True),
             max_steps=settings.max_steps_for("test_gen"),
             memory=ShortTermMemory(max_turns=settings.memory_turns),
+            tool_calling=settings.tool_calling,
         )
         return agent.run(task)
 

@@ -7,7 +7,7 @@ from typing import Sequence
 
 from agentcode.core.context import RunContext
 from agentcode.core.errors import LLMError
-from agentcode.llm.base import Message
+from agentcode.llm.base import LLMReply, Message
 from agentcode.middleware.base import LLMCall, Middleware, ToolCall
 
 
@@ -33,7 +33,7 @@ class TimeoutMiddleware(Middleware):
     def wrap_llm(self, call: LLMCall, ctx: RunContext) -> LLMCall:
         """包装模型调用。"""
 
-        def wrapped(messages: Sequence[Message]) -> str:
+        def wrapped(messages: Sequence[Message]) -> LLMReply:
             try:
                 return self._run(call, (messages,))  # type: ignore[return-value]
             except FutureTimeoutError as exc:

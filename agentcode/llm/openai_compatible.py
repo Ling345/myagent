@@ -12,7 +12,7 @@ import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from agentcode.core.errors import ConfigError, LLMError
-from agentcode.llm.base import BaseLLM, Message
+from agentcode.llm.base import BaseLLM, LLMReply, Message, ToolCallRequest
 from agentcode.llm.keypool import (
     DEFAULT_COOLDOWN_SECONDS,
     DEFAULT_FAILURE_THRESHOLD,
@@ -68,6 +68,24 @@ def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
     return data or None
 
 
+def _tool_calls_to_list(raw: Any) -> list[ToolCallRequest]:
+    """把 SDK 返回的 ``tool_calls`` 转成我们自己的结构。"""
+    calls: list[ToolCallRequest] = []
+    for item in raw or []:
+        function = getattr(item, "function", None)
+        name = getattr(function, "name", None) or getattr(item, "name", None)
+        if not name:
+            continue
+        calls.append(
+            ToolCallRequest(
+                id=str(getattr(item, "id", "") or ""),
+                name=str(name),
+                arguments=str(getattr(function, "arguments", "") or ""),
+            )
+        )
+    return calls
+
+
 def _status_of(exc: BaseException) -> int | None:
     """尽量从异常里挖出 HTTP 状态码。"""
     for attribute in ("status_code", "http_status", "code"):
@@ -94,6 +112,8 @@ class OpenAICompatibleLLM(BaseLLM):
     """调用任何兼容 OpenAI 接口的服务。"""
 
     name = "openai"
+    #: 走 OpenAI 协议的服务基本都支持把工具 schema 交给模型
+    supports_tools = True
 
     def __init__(
         self,
@@ -155,26 +175,49 @@ class OpenAICompatibleLLM(BaseLLM):
 
     # ------------------------------------------------------------------ 调用
 
-    def _call_once(self, messages: Sequence[Message], temperature: float, state: Any) -> str:
+    def _call_once(
+        self,
+        messages: Sequence[Message],
+        temperature: float,
+        state: Any,
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+    ) -> LLMReply:
         """用指定 key 完整跑一次请求（含流式读取）。
 
         顺手把耗时与成败记进指标——标签用 key 的**下标**，
         下标顺序与 `agentcode config` 里那串脱敏 key 一致。
+
+        带 ``tools`` 时走**原生工具调用**：这次请求固定非流式（分块响应里
+        没有 ``tool_calls``），并把工具 schema 一起发过去。
         """
         client = self._client_for(state.key)
         started = time.perf_counter()
+        use_tools = bool(tools)
+        streaming = self.stream and not use_tools
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[dict(message) for message in messages],
-                temperature=temperature,
-                stream=self.stream,
-            )
-            if not self.stream:
-                content = response.choices[0].message.content or ""
+            request: dict[str, Any] = {
+                "model": self.model,
+                "messages": [dict(message) for message in messages],
+                "temperature": temperature,
+                "stream": streaming,
+            }
+            if use_tools:
+                request["tools"] = [dict(tool) for tool in tools or ()]
+                request["tool_choice"] = "auto"
+            response = client.chat.completions.create(**request)
+            if not streaming:
+                choice = response.choices[0]
+                message = getattr(choice, "message", None)
+                content = getattr(message, "content", "") or ""
+                calls = _tool_calls_to_list(getattr(message, "tool_calls", None))
                 self._last_usage = _usage_to_dict(getattr(response, "usage", None))
                 _record_llm_call(state.index, "ok", started)
-                return content
+                return LLMReply(
+                    text=content,
+                    tool_calls=calls,
+                    finish_reason=str(getattr(choice, "finish_reason", "") or ""),
+                )
 
             chunks: list[str] = []
             usage: dict[str, Any] | None = None
@@ -196,7 +239,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 "estimated": True,
             }
             _record_llm_call(state.index, "ok", started)
-            return text
+            return LLMReply(text=text)
         except LLMError:
             _record_llm_call(state.index, "failed", started)
             raise
@@ -207,12 +250,14 @@ class OpenAICompatibleLLM(BaseLLM):
                 raise _RetryableLLMError(message) from exc
             raise LLMError(message) from exc
 
-    def think(
+    def complete(
         self,
         messages: Sequence[Message],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
-    ) -> str:
-        """调用模型并返回完整回复文本；失败时自动换 key 重试。"""
+    ) -> LLMReply:
+        """调用模型并返回完整回复；失败时自动换 key 重试。"""
         used_temperature = self.temperature if temperature is None else temperature
         attempts = len(self.pool)
         last_error: LLMError | None = None
@@ -222,18 +267,18 @@ class OpenAICompatibleLLM(BaseLLM):
             if state is None:
                 break
             try:
-                text = self._call_once(messages, used_temperature, state)
+                reply = self._call_once(
+                    messages, used_temperature, state, tools=tools
+                )
             except _RetryableLLMError as exc:
-                # 这个 key 有问题（限流/额度/停用/抖动）：记账后换下一个
                 self.pool.report_failure(state)
                 last_error = exc
                 continue
             except LLMError:
-                # 我们自己请求写错了，换 key 也没用，别污染熔断计数
                 raise
             self.pool.report_success(state)
             self.last_key_index = state.index
-            return text
+            return reply
 
         if last_error is not None:
             raise LLMError(f"{last_error}（已依次尝试 {attempts} 个 key，全部失败）")
@@ -244,3 +289,11 @@ class OpenAICompatibleLLM(BaseLLM):
             f"所有 API key 都在熔断冷却中（共 {len(self.pool)} 个）{hint}。"
             "请补充新的 key，或稍后重试。"
         )
+
+    def think(
+        self,
+        messages: Sequence[Message],
+        temperature: float | None = None,
+    ) -> str:
+        """调用模型并返回完整回复文本；失败时自动换 key 重试。"""
+        return self.complete(messages, temperature=temperature).text
