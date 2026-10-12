@@ -31,8 +31,15 @@ _CLIENT_LOCK = threading.Lock()
 RETRYABLE_STATUS = frozenset({401, 403, 408, 409, 425, 429, 500, 502, 503, 504, 522, 524})
 
 
-class _RetryableLLMError(LLMError):
-    """换个 key 还有救的错误（外部不要依赖这个类型）。"""
+class RetryableLLMError(LLMError):
+    """限流/抖动这类"过一会儿/换一个 key 还有救"的错误。
+
+    多模型路由靠它判断"要不要先退避再降级"（见 :mod:`agentcode.llm.routing`）。
+    """
+
+
+#: 兼容老名字
+_RetryableLLMError = RetryableLLMError
 
 
 def _record_llm_call(key_index: int, result: str, started: float) -> None:
@@ -281,7 +288,10 @@ class OpenAICompatibleLLM(BaseLLM):
             return reply
 
         if last_error is not None:
-            raise LLMError(f"{last_error}（已依次尝试 {attempts} 个 key，全部失败）")
+            # 这一档的 key 全试完了还是可重试的错：交给上层决定退避/降级
+            raise RetryableLLMError(
+                f"{last_error}（已依次尝试 {attempts} 个 key，全部失败）"
+            )
 
         wait = self.pool.next_ready_in()
         hint = f"，最快约 {wait:.0f} 秒后自动恢复" if wait else ""

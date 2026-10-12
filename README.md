@@ -674,6 +674,42 @@ Agent 实现 (agentcode.agents.*)  ── 注册到 ──▶  AgentRegistry
 要求模型回一段 JSON（`agentcode/llm/structured.py`），校验必填字段与类型，
 不合格就把问题回给模型重试一次；拿不到合格 JSON 时退回按文本解析。
 
+### 多模型档位：按用途挑模型，挂了自动降级
+
+写代码要强模型，回显、汇总用便宜的就够；单家供应商抖一下，整个服务也不该跟着抖。
+把模型配成**档位**（profile）就能兼顾这两件事。配置文件模板见
+[`configs/models.example.json`](configs/models.example.json)，密钥仍然只在 `.env` 里：
+
+```json
+{
+  "default": "strong",
+  "profiles": {
+    "strong": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com",
+                "api_key_env": "LLM_API_KEY", "fallback": ["cheap"]},
+    "cheap":  {"model": "deepseek-chat", "base_url": "https://api.deepseek.com",
+                "api_key_env": "LLM_API_KEY_CHEAP", "fallback": ["local"]},
+    "local":  {"model": "qwen2.5:7b", "base_url": "http://127.0.0.1:11434/v1",
+                "api_key_env": "LLM_API_KEY_LOCAL"}
+  },
+  "by_agent": {"echo": "cheap", "test_gen": "cheap"}
+}
+```
+
+```powershell
+# 在 .env 里指到这份配置（留空 = 不启用档位，仍走单模型）
+AGENT_MODEL_PROFILES_FILE=configs/models.json
+
+D:\Anaconda\python.exe -m agentcode config                       # 看当前档位（不显示密钥）
+D:\Anaconda\python.exe -m agentcode run --agent react --model-profile cheap --task "..."
+```
+
+- **选档顺序**：`--model-profile` 显式指定 > `by_agent`（按智能体名）> `default` > 配置文件里第一个写的；
+- **降级**：某一档整体不可用时按 `fallback` 链换下一档——限流/超时这类先退避一下再换，
+  其它错误立刻换；**一次运行内不回头**，结果里会写清"这次是谁答的"（`model_profile`）；
+- **留痕**：`agentcode_model_used_total{profile}`、`agentcode_model_fallback_total{from,to}`，
+  降级时还会在终端打印一行提示；
+- 没配档位时行为与以前完全一致（单模型 + 多 key 轮换熔断）。
+
 ## 三种范式的示例输出
 
 命令行会打印完整轨迹（终端本来就是给开发者看的），网页只给结果。
@@ -767,6 +803,7 @@ def add(a: str, b: str) -> str:
 | `AGENT_MAX_STEPS` | 否 | `6` | 闲聊类智能体的最大步数 |
 | `AGENT_CODING_STEPS` | 否 | `20` | coding 智能体的最大步数 |
 | `AGENT_TOOL_CALLING` | 否 | `auto` | 工具调用模式：`auto` / `native`（原生 tool_calls）/ `text`（文本协议） |
+| `AGENT_MODEL_PROFILES_FILE` | 否 | 无 | 多模型档位配置（JSON）路径；留空 = 走单模型 |
 | `AGENT_MEMORY_TURNS` | 否 | `5` | 每个会话记住几轮上下文 |
 | `AGENT_MAX_SESSIONS` | 否 | `20` | 网页同时保留多少个会话 |
 | `AGENT_WEB_SESSION_DIR` | 否 | `traces/web-sessions` | 网页会话（名字 + 完整记录）落盘目录 |

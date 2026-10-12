@@ -253,3 +253,7 @@ CALLBACKS = METRICS.counter(
 TOOL_CALLING = METRICS.counter(
     "agentcode_tool_calling_total", "工具调用的走法，按模式（native/text/fallback）"
 )
+MODEL_USED = METRICS.counter("agentcode_model_used_total", "每个模型档位答了多少次请求")
+MODEL_FALLBACK = METRICS.counter(
+    "agentcode_model_fallback_total", "模型档位降级次数，按 from/to"
+)

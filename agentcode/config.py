@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -95,6 +96,9 @@ DEFAULT_NOTIFY_WEBHOOK = ""
 DEFAULT_API_ENABLED = True
 #: 工具调用模式：auto = 后端支持就用原生工具调用、不支持就退回文本协议
 DEFAULT_TOOL_CALLING = "auto"
+#: 多模型档位配置文件（JSON）：描述"档位 → 模型 / base_url / key 的环境变量名"。
+#: 留空 = 不启用档位，走单模型那条老路。
+DEFAULT_MODEL_PROFILES_FILE = ""
 #: 对外 API 的任务台账保留多少天（异步任务的结果要留着给调用方取）
 DEFAULT_API_RUNS_DAYS = 7
 #: 任务完成回调：签名密钥留空则回落 AGENT_SECRET_KEY；重试次数、超时、端口白名单
@@ -160,6 +164,43 @@ def _to_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _load_model_profiles(path: str) -> tuple[dict[str, Any], str, dict[str, str]]:
+    """读取多模型档位配置。
+
+    两种写法都认：
+
+    - 推荐：``{"profiles": {...}, "default": "strong", "by_agent": {...}}``
+    - 手写简版：顶层直接就是档位表 ``{"strong": {...}, "cheap": {...}}``
+
+    读不到或不是合法 JSON 时返回空——**报错交给 validate()**，
+    这样"读取"和"校验"各管一段，测试也好写。
+    """
+    text = str(path or "").strip()
+    if not text:
+        return {}, "", {}
+    target = Path(text)
+    if not target.is_file():
+        return {}, "", {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, "", {}
+    if not isinstance(data, dict):
+        return {}, "", {}
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = {
+            str(name): value for name, value in data.items() if isinstance(value, dict)
+        }
+    default = str(data.get("default") or data.get("default_profile") or "")
+    by_agent = data.get("by_agent") or data.get("profile_by_agent") or {}
+    return (
+        {str(name): value for name, value in profiles.items()},
+        default,
+        {str(name): str(choice) for name, choice in dict(by_agent).items()},
+    )
 
 
 @dataclass
@@ -230,6 +271,14 @@ class Settings:
     api_enabled: bool = DEFAULT_API_ENABLED
     #: 工具调用模式：auto / native / text（见 agentcode.core.agent.TOOL_CALLING_MODES）
     tool_calling: str = DEFAULT_TOOL_CALLING
+    #: 多模型档位：{档位名: {model, base_url, api_key_env/api_keys_env, fallback, ...}}
+    model_profiles: dict[str, Any] = field(default_factory=dict)
+    #: 档位配置文件的路径（配了却读不到会在 validate 里报错）
+    model_profiles_file: str = DEFAULT_MODEL_PROFILES_FILE
+    #: 默认档位；留空时取名字排序后的第一个
+    default_profile: str = ""
+    #: 按智能体名指定档位：{"test_gen": "cheap"}
+    profile_by_agent: dict[str, str] = field(default_factory=dict)
     #: 对外 API 的任务台账保留多少天；0 = 永久保留
     api_runs_days: int = DEFAULT_API_RUNS_DAYS
     #: 任务完成回调的签名密钥；留空回落 AGENT_SECRET_KEY（两个都没有就拒收 callback_url）
@@ -254,6 +303,9 @@ class Settings:
     notify_login_failures: int = DEFAULT_NOTIFY_LOGIN_FAILURES
     notify_login_window_minutes: int = DEFAULT_NOTIFY_LOGIN_WINDOW_MINUTES
     env_file: str | None = None
+    #: .env 文件里的原始键值（只给"档位里写 api_key_env"这类场景取值用）。
+    #: ``repr=False``：万一有人 print(settings) 也不会把密钥带出来。
+    dotenv: dict[str, str] = field(default_factory=dict, repr=False)
     extra: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ 构造
@@ -288,6 +340,9 @@ class Settings:
 
         # LLM_API_KEYS 支持逗号/换行分隔的多个 key；没配就回落到单个 LLM_API_KEY
         api_keys = parse_keys(pick("LLM_API_KEYS") or pick("LLM_API_KEY"))
+
+        profiles_file = str(pick("AGENT_MODEL_PROFILES_FILE", DEFAULT_MODEL_PROFILES_FILE) or "")
+        profiles_data, default_profile, profile_by_agent = _load_model_profiles(profiles_file)
 
         return cls(
             model=pick("LLM_MODEL_ID"),
@@ -371,6 +426,10 @@ class Settings:
             tool_calling=str(
                 pick("AGENT_TOOL_CALLING", DEFAULT_TOOL_CALLING) or DEFAULT_TOOL_CALLING
             ).strip().lower(),
+            model_profiles=profiles_data,
+            model_profiles_file=profiles_file,
+            default_profile=default_profile,
+            profile_by_agent=profile_by_agent,
             api_runs_days=_to_int(pick("AGENT_API_RUNS_DAYS"), DEFAULT_API_RUNS_DAYS),
             callback_secret=pick("AGENT_CALLBACK_SECRET"),
             callback_max_attempts=_to_int(
@@ -400,20 +459,37 @@ class Settings:
                 pick("AGENT_NOTIFY_LOGIN_WINDOW_MINUTES"), DEFAULT_NOTIFY_LOGIN_WINDOW_MINUTES
             ),
             env_file=str(resolved) if resolved else None,
+            dotenv=dict(file_values),
         )
 
     def apply_overrides(self, overrides: Mapping[str, Any]) -> "Settings":
-        """按 JSON 配置文件内容覆盖已有字段，未知字段进入 ``extra``。"""
+        """按 JSON 配置文件内容覆盖已有字段，未知字段进入 ``extra``。
+
+        ``profiles`` / ``by_agent`` / ``default`` 这几个"档位配置文件里的写法"
+        在这里映射到对应字段，方便直接把手写的 models.json 当配置文件用。
+        """
+        aliases = {"profiles": "model_profiles", "by_agent": "profile_by_agent", "default": "default_profile"}
+        normalized = {aliases.get(str(key), str(key)): value for key, value in overrides.items()}
         known = {f for f in self.__dataclass_fields__ if f not in {"extra", "env_file"}}
         updates: dict[str, Any] = {}
         extra = dict(self.extra)
-        for key, value in overrides.items():
+        for key, value in normalized.items():
             if key in known:
                 updates[key] = value
             else:
                 extra[key] = value
         merged = replace(self, **updates)
         merged.extra = extra
+        return merged
+
+    def profile_env(self) -> dict[str, str]:
+        """给"档位里写 api_key_env"取值用的环境：.env 里的值 + 进程环境（进程优先）。
+
+        框架是自己解析 .env 的，不会把它塞进 ``os.environ``；档位的 key 名是用户
+        自己起的（例如 ``LLM_API_KEY_CHEAP``），所以这里得把两边合起来查。
+        """
+        merged = dict(self.dotenv)
+        merged.update({str(key): str(value) for key, value in os.environ.items()})
         return merged
 
     # ------------------------------------------------------------------ 校验
@@ -472,6 +548,22 @@ class Settings:
                 "AGENT_TOOL_CALLING 只支持 auto / native / text，"
                 f"当前是：{self.tool_calling}。"
             )
+        # 多模型档位：文件读不到、或者档位本身配错了，都要在启动/提交任务之前说清楚
+        profiles_file = str(self.model_profiles_file or "").strip()
+        if profiles_file and not Path(profiles_file).is_file():
+            raise ConfigError(
+                f"模型档位配置读不到：{profiles_file}（AGENT_MODEL_PROFILES_FILE）。"
+                "要么把文件放对位置，要么把这个变量留空（留空就走单模型）。"
+            )
+        if self.model_profiles:
+            from agentcode.llm.routing import parse_profiles
+
+            parse_profiles(self.model_profiles, env=self.profile_env())
+        if self.profile_by_agent and not self.model_profiles:
+            raise ConfigError("配了 profile_by_agent，却没有配置任何模型档位（model_profiles）。")
+        if self.default_profile and self.model_profiles:
+            if self.default_profile not in self.model_profiles:
+                raise ConfigError(f"default_profile 指定的档位不存在：{self.default_profile}。")
         # 自动备份只在配了目录时才有意义；配了就要求其余参数能真正生效，
         # 否则会出现"以为在备份，其实一次都没备"——那比不备份更危险
         if self.backup_dir:
@@ -541,6 +633,8 @@ class Settings:
                 "native": "强制原生工具调用",
                 "text": "强制文本协议",
             }.get(self.tool_calling, self.tool_calling),
+            "AGENT_MODEL_PROFILES": self._profiles_summary(),
+            "AGENT_MODEL_PROFILES_FILE": self.model_profiles_file or "（未配置，单模型）",
             "AGENT_API_RUNS_DAYS": str(self.api_runs_days)
             + ("（永久保留）" if self.api_runs_days <= 0 else ""),
             # 回调的签名密钥按密钥处理：它能让攻击者伪造回调
@@ -589,3 +683,25 @@ class Settings:
         if len(keys) == 1:
             return f"共 1 个：{mask_key(keys[0])}"
         return f"共 {len(keys)} 个：" + "、".join(mask_key(key) for key in keys)
+
+    def _profiles_summary(self) -> str:
+        """多模型档位的一行摘要——只说模型与"key 取哪个环境变量"，不显示 key。"""
+        if not self.model_profiles:
+            return "（未配置，走单模型）"
+        parts: list[str] = []
+        for name in sorted(self.model_profiles):
+            raw = self.model_profiles.get(name)
+            item = raw if isinstance(raw, Mapping) else {}
+            model = str(item.get("model") or "（未填模型）")
+            env_name = str(item.get("api_key_env") or item.get("api_keys_env") or "（未填 key）")
+            fallback = "、".join(str(x) for x in (item.get("fallback") or ()))
+            suffix = f"，降级到 {fallback}" if fallback else ""
+            parts.append(f"{name}（{model}，key 取环境变量 {env_name}{suffix}）")
+        default = self.default_profile or next(iter(self.model_profiles), "")
+        text = f"{len(parts)} 个档位：{'；'.join(parts)}；默认 {default}"
+        if self.profile_by_agent:
+            pairs = "、".join(
+                f"{name}→{choice}" for name, choice in sorted(self.profile_by_agent.items())
+            )
+            text += f"；按智能体：{pairs}"
+        return text
