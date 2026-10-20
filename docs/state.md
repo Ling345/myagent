@@ -18,9 +18,9 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 本地路径 | `D:\agent\agentcode-homework1` |
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v8**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
-| 代码量 | `agentcode/` 约 1.37 万行 Python；77 个测试文件 |
-| 测试 | **953 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
-| 提交 | 95 次；PR #1–#17、#18、#19、#20 已合并（#2 是重复提交，已关闭未合并） |
+| 代码量 | `agentcode/` 约 1.37 万行 Python；78 个测试文件 |
+| 测试 | **958 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
+| 提交 | 96 次；PR #1–#17、#18、#19、#20、#21 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -47,6 +47,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | `web/runner.py` | 把一次 agent 运行变成事件流（status/step/answer/error），sync 与 async 共用 | 运行链路 |
 | `web/sessions.py` | 会话仓库（按账号分目录、磁盘持久化、回收站软删除） | 会话 |
 | `web/static/` | `index.html` / `app.js` / `style.css`（浅蓝流动背景、面板式侧栏） | 界面 |
+| `web/static/trace.*` | 运行追踪页（`/trace`）：时间线 / 工具 / 观察 / 耗时 / 答案，排查用 | 改追踪界面 |
 
 ## 3. 已完成（按 PR）
 
@@ -72,6 +73,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | #19 | 多模型档位与跨供应商降级（`llm/routing.py`、`configs/models.example.json`） |
 | （直推 main） | 提示词前缀稳定（稳定 system 块 + 变化 user 块）+ 缓存命中 token 解析与指标（`ba21970`） |
 | #20 | 对外流式：`/v1/run` 的 SSE + OpenAI 兼容 `/v1/chat/completions`（含流式）+ `GET /v1/models` |
+| #21 | 运行追踪页 `/trace`：把一次运行的事件流画成时间线（工具/观察/耗时/答案） |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
@@ -133,7 +135,6 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 多模态输入（图片/PDF） | 现在只收文本、单文件 2 MB | 有"看图"需求再做 |
 | 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
 | MCP（接别人的工具 + 把自己暴露成 MCP server） | 工具生态入口，一次投入长期受益 | 工具现在写死在 `tools/` |
-| 运行追踪 UI（时间线 / 每步 token / 重放） | 已有 JSON 与事件流，只差画出来；演示价值高 | 现在只有 CLI + `/metrics` |
 | 评测与回归（黄金集 + LLM-as-judge） | "敢改提示词"的前提 | 现在没有 eval 工具 |
 | 工作流的持久化执行 / 人工审批 / 定时触发 | 工作流产品的分界线 | 这块在作业2 仓库（`agentcode-workflow`）做 |
 
@@ -219,6 +220,12 @@ launch_chrome_cdp.ps1 + verify_*.mjs（真浏览器验证）
   调用方不能通过 system 消息把它们关掉（这是刻意的）。
 - **流式是步骤级**：每个工具调用结束推一条，最终答案在 `answer` / 最后一个 chunk 一次给出；
   逐 token 输出要模型后端支持回调，当前没做。
+- **`/trace` 是排查视图，展示推理与工具观察**：不违反"页面只给结果"的约定——那条约定
+  针对普通对话页；追踪页在标题下写明了"排查视图"，且只对登录用户展示自己的运行。
+- **追踪页只认内存里的网页运行**（`RunRegistry`，TTL 30 分钟、重启即失），不是
+  `api_runs` 台账；要"历史回放"得先把事件落盘（未做）。
+- **每步 token 还没有**：追踪页给的是每步耗时 + 运行级 usage；把 token 归因到单步
+  需要在中间件里记增量再挂到 Step 上（未做）。
 
 ## 9. 这个项目的约定（别破坏）
 

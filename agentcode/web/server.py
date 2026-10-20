@@ -1885,6 +1885,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._serve_static("index.html")
             return
+        # 排查用的运行轨迹页（普通对话页仍然只给结果）
+        if path in ("/trace", "/trace.html"):
+            self._serve_static("trace.html")
+            return
         if path.startswith("/static/"):
             self._serve_static(path[len("/static/") :])
             return
