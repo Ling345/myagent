@@ -26,6 +26,7 @@ from agentcode.core.parsing import parse_action, parse_finish, parse_react_outpu
 from agentcode.core.registry import register_agent
 from agentcode.core.result import AgentResult, Step
 from agentcode.llm.base import LLMReply, Message
+from agentcode.llm.attachments import user_content
 from agentcode.metrics import TOOL_CALLING
 from agentcode.tools.base import FINISH_TOOL_NAME
 
@@ -41,7 +42,11 @@ class ReActAgent(BaseAgent):
     NATIVE_SYSTEM_PROMPT = REACT_NATIVE_SYSTEM_PROMPT
 
     def _build_messages(
-        self, task: str, steps: list[str], history: str
+        self,
+        task: str,
+        steps: list[str],
+        history: str,
+        context: RunContext | None = None,
     ) -> list[Message]:
         """两段式消息：稳定的 system + 变化的 user（prefix cache 才命中得了）。"""
         return [
@@ -51,10 +56,13 @@ class ReActAgent(BaseAgent):
             },
             {
                 "role": "user",
-                "content": REACT_TASK_TEMPLATE.format(
-                    history=history,
-                    steps="\n".join(steps) if steps else "（暂无）",
-                    question=task,
+                "content": user_content(
+                    REACT_TASK_TEMPLATE.format(
+                        history=history,
+                        steps="\n".join(steps) if steps else "（暂无）",
+                        question=task,
+                    ),
+                    context.images if context is not None else None,
                 ),
             },
         ]
@@ -83,7 +91,9 @@ class ReActAgent(BaseAgent):
 
     # -------------------------------------------------------------- 原生工具调用
 
-    def _build_native_messages(self, task: str, history: str) -> list[Message]:
+    def _build_native_messages(
+        self, task: str, history: str, context: RunContext | None = None
+    ) -> list[Message]:
         """原生模式：同样"稳定 system + 变化 user"。"""
         return [
             {
@@ -92,8 +102,9 @@ class ReActAgent(BaseAgent):
             },
             {
                 "role": "user",
-                "content": REACT_NATIVE_TASK_TEMPLATE.format(
-                    history=history, question=task
+                "content": user_content(
+                    REACT_NATIVE_TASK_TEMPLATE.format(history=history, question=task),
+                    context.images if context is not None else None,
                 ),
             },
         ]
@@ -101,7 +112,7 @@ class ReActAgent(BaseAgent):
     def _run_native(self, task: str, ctx: RunContext) -> AgentResult | None:
         """走原生工具调用；返回 ``None`` 表示"这家不支持，请回退"。"""
         history = self._history_text()
-        messages: list[Message] = self._build_native_messages(task, history)
+        messages: list[Message] = self._build_native_messages(task, history, ctx)
         schemas = self.tools.json_schemas()
 
         for _ in range(self.max_steps):
@@ -198,7 +209,7 @@ class ReActAgent(BaseAgent):
         steps: list[str] = []
 
         for _ in range(self.max_steps):
-            messages = self._build_messages(task, steps, history)
+            messages = self._build_messages(task, steps, history, ctx)
             try:
                 raw = self._think(messages, ctx)
             except LLMError as exc:

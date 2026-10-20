@@ -1288,6 +1288,66 @@ button:disabled {
   border-color: var(--accent);
 }
 
+/* 图片附件：缩略图 + 文件名 + 撤回按钮 */
+.upload-chip-image {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 4px 8px 4px 4px;
+  font-family: var(--font-ui);
+  cursor: default;
+}
+
+.upload-chip-image img {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.upload-chip-remove {
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.upload-chip-remove:hover {
+  color: var(--danger);
+}
+
+/* 用户消息里的图片：只做缩略图，不撑破气泡 */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.msg-image {
+  margin: 0;
+}
+
+.msg-image img {
+  display: block;
+  max-width: 220px;
+  max-height: 180px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.msg-image figcaption {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
 /* 默认收起：主界面只给结果，这是既有约定 */
 #billing-panel[hidden] { display: none; }
 

@@ -13,15 +13,16 @@ from __future__ import annotations
 import queue
 import threading
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
 from agentcode.config import Settings
 from agentcode.core.agent import BaseAgent
 from agentcode.core.context import RunContext
-from agentcode.core.errors import AgentCodeError
+from agentcode.core.errors import AgentCodeError, ConfigError
 from agentcode.core.registry import default_registry
-from agentcode.llm.mock import demo_responses_llm
+from agentcode.llm.attachments import VISION_REQUIRED
+from agentcode.llm.mock import demo_responses_llm, demo_vision_llm
 from agentcode.llm.routing import build_llm_for_agent
 from agentcode.memory import ShortTermMemory
 from agentcode.middleware import BudgetMiddleware, RetryMiddleware, TimeoutMiddleware
@@ -147,15 +148,30 @@ def create_backend(
     settings: Settings,
     max_steps: int | None = None,
     memory: ShortTermMemory | None = None,
+    *,
+    images: Sequence[Mapping[str, Any]] | None = None,
 ) -> BaseAgent:
     """装配一个智能体实例（模型、工具与上下文记忆；中间件随后注入）。"""
     if llm_mode == "mock":
-        llm = demo_responses_llm(agent_name)
+        if images:
+            llm = demo_vision_llm(
+                len(images), [str(item.get("name") or "") for item in images], agent_name
+            )
+        else:
+            llm = demo_responses_llm(agent_name)
         tools = build_tools(mock=True)
     else:
         settings.validate()
-        # 配了多模型档位就按智能体选档位（含降级链），没配就是原来的单模型
-        llm = build_llm_for_agent(settings, agent=agent_name)
+        # 配了多模型档位就按智能体选档位（含降级链），没配就是原来的单模型。
+        # 带图的请求必须走视觉后端，否则供应商会把图片当垃圾，报一个跟
+        # "图片太大/格式不对"毫无关系的错。
+        if images and not (settings.vision_profile or settings.model_vision):
+            raise ConfigError(VISION_REQUIRED)
+        llm = build_llm_for_agent(
+            settings,
+            agent=agent_name,
+            explicit=settings.vision_profile or None,
+        )
         tools = build_tools(mock=False, settings=settings, agent_name=agent_name)
 
     return default_registry.create(
@@ -179,6 +195,7 @@ def run_stream(
     session_store: SessionStore | None = None,
     session_id: str | None = None,
     memory: ShortTermMemory | None = None,
+    images: Sequence[Mapping[str, Any]] | None = None,
 ) -> Iterator[Event]:
     """在后台线程里执行智能体，把事件按发生顺序逐条产出。
 
@@ -198,19 +215,35 @@ def run_stream(
             active_settings = settings or Settings.from_env()
             ctx = RunContext(
                 task=task,
+                images=[dict(item) for item in (images or [])],
                 on_step=lambda step: emit({"type": "step", "data": step.to_dict()}),
             )
 
             if session_store is not None and session_id:
+                if images:
+                    # 上一轮可能缓存的是文本模型；带图这一轮必须重新装配。
+                    # 记忆不丢：get() 会从会话记录里重建。
+                    session_store.forget_agent(session_id)
                 agent = session_store.get(
                     session_id,
-                    lambda: create_backend(agent_name, llm_mode, active_settings, max_steps),
+                    lambda: create_backend(
+                        agent_name,
+                        llm_mode,
+                        active_settings,
+                        max_steps,
+                        images=images,
+                    ),
                     max_turns=active_settings.memory_turns,
                 )
                 session_store.append_message(session_id, "user", task)
             else:
                 agent = create_backend(
-                    agent_name, llm_mode, active_settings, max_steps, memory=memory
+                    agent_name,
+                    llm_mode,
+                    active_settings,
+                    max_steps,
+                    memory=memory,
+                    images=images,
                 )
 
             # 中间件绑定本次请求的事件出口，所以每次请求都换一套

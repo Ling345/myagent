@@ -26,6 +26,8 @@ class RunContext:
     steps: list[Step] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     extras: dict[str, Any] = field(default_factory=dict)
+    #: 本次任务带的图片（``make_attachment`` 的结构：name / media_type / data_url）
+    images: list[dict[str, Any]] = field(default_factory=list)
     on_step: Callable[[Step], None] | None = None
     _monotonic: float = field(default_factory=time.monotonic, repr=False)
 

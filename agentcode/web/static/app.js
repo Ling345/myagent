@@ -93,6 +93,9 @@ const state = {
   followTail: true,
 };
 
+//: 已经上传、但还没随消息发出的图片（发完就清空）
+let pendingImages = [];
+
 //: 断线后最多重连几次、每次等多久（毫秒，按次数递增）
 const MAX_RESUME_ATTEMPTS = 5;
 const RESUME_BACKOFF_MS = 700;
@@ -524,7 +527,8 @@ function renderTranscript(messages) {
       message.content,
       undefined,
       message.success === false,
-      message.artifacts || []
+      message.artifacts || [],
+      message.images || []
     );
   });
   // 切换会话时总是跳到最新一条，不沿用上一个会话的跟随状态
@@ -532,13 +536,15 @@ function renderTranscript(messages) {
   scrollToEnd(true);
 }
 
-function appendMessage(role, text, metaText, isError = false, artifacts = []) {
+function appendMessage(role, text, metaText, isError = false, artifacts = [], images = []) {
   const wrapper = document.createElement("div");
   wrapper.className = `msg msg-${role}` + (isError ? " msg-error" : "");
   const body = document.createElement("div");
   body.className = "msg-body";
   body.textContent = text;
   wrapper.appendChild(body);
+  const gallery = buildImageGallery(images);
+  if (gallery) wrapper.appendChild(gallery);
   if (metaText) {
     const meta = document.createElement("p");
     meta.className = "msg-meta";
@@ -550,6 +556,30 @@ function appendMessage(role, text, metaText, isError = false, artifacts = []) {
   els.messages.appendChild(wrapper);
   scrollToEnd();
   return wrapper;
+}
+
+/** 用户消息里的图片缩略图（预览用 data URL，刷新后仍在当前会话里）。 */
+function buildImageGallery(images) {
+  const list = (images || []).filter((item) => item && item.url);
+  if (!list.length) return null;
+  const box = document.createElement("div");
+  box.className = "msg-images";
+  list.forEach((item) => {
+    const figure = document.createElement("figure");
+    figure.className = "msg-image";
+    const img = document.createElement("img");
+    img.src = item.url;
+    img.alt = item.name || "图片";
+    img.loading = "lazy";
+    figure.appendChild(img);
+    if (item.name) {
+      const caption = document.createElement("figcaption");
+      caption.textContent = item.name;
+      figure.appendChild(caption);
+    }
+    box.appendChild(figure);
+  });
+  return box;
 }
 
 function formatBytes(bytes) {
@@ -674,7 +704,7 @@ async function submitRun(event) {
   event.preventDefault();
   if (state.running) return;
 
-  const task = els.task.value.trim();
+  const task = els.task.value.trim() || (pendingImages.length ? "请描述这张图片。" : "");
   if (!task) {
     els.task.focus();
     els.runStatus.textContent = "先写下一个任务。";
@@ -686,10 +716,18 @@ async function submitRun(event) {
   }
 
   const sessionId = state.currentSessionId;
+  const attachments = pendingImages.map((item) => ({ ...item }));
   const payload = { agent: selectedAgent(), task, session_id: sessionId };
+  if (attachments.length) payload.images = attachments.map((item) => item.path);
 
-  appendMessage("user", task);
-  currentTurnMessages.push({ role: "user", content: task, success: true });
+  appendMessage("user", task, undefined, false, [], attachments);
+  currentTurnMessages.push({
+    role: "user",
+    content: task,
+    success: true,
+    images: attachments.map((item) => ({ name: item.name, url: item.url })),
+  });
+  clearPendingImages();
   els.empty.hidden = true;
   els.task.value = "";
   autoGrow();
@@ -1400,7 +1438,7 @@ const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 /**
  * 把文件传进自己的工作目录（每个账号一个目录，互相看不到）。
  *
- * 走原始 body 而不是 FormData：要的只是文本，不走 multipart 更简单，
+ * 走原始 body 而不是 FormData：一次只传一个文件，不走 multipart 更简单，
  * 服务端也少一层解析。
  */
 async function uploadFiles(fileList) {
@@ -1417,7 +1455,7 @@ async function uploadFiles(fileList) {
     try {
       const response = await fetch(`/api/upload?path=${encodeURIComponent(file.name)}`, {
         method: "POST",
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        headers: { "Content-Type": file.type || "application/octet-stream" },
         body: file,
       });
       const payload = await response.json().catch(() => ({}));
@@ -1425,7 +1463,11 @@ async function uploadFiles(fileList) {
         failed.push(`${file.name}（${payload.error || response.status}）`);
         continue;
       }
-      addUploadChip(payload.path, payload.bytes);
+      if (payload.kind === "image") {
+        addImageChip(payload.path, payload.bytes, file, await readFileAsDataUrl(file));
+      } else {
+        addUploadChip(payload.path, payload.bytes);
+      }
     } catch (error) {
       failed.push(`${file.name}（${error.message}）`);
     }
@@ -1433,7 +1475,61 @@ async function uploadFiles(fileList) {
 
   els.runStatus.textContent = failed.length
     ? `没能上传：${failed.join("；")}`
-    : "上传好了，直接说要对它做什么就行。";
+    : pendingImages.length
+      ? "图片已就绪：发消息时会一起带给模型。"
+      : "上传好了，直接说要对它做什么就行。";
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** 图片附件：缩略图 + 文件名，点 × 可以撤回。 */
+function addImageChip(path, bytes, file, previewUrl) {
+  els.uploadChips.hidden = false;
+  const existing = pendingImages.find((item) => item.path === path);
+  if (existing) removePendingImage(existing);
+
+  const item = { path, bytes, name: file.name, url: previewUrl };
+  pendingImages.push(item);
+
+  const chip = document.createElement("div");
+  chip.className = "upload-chip upload-chip-image";
+  chip.dataset.path = path;
+  const img = document.createElement("img");
+  img.src = previewUrl;
+  img.alt = file.name;
+  const label = document.createElement("span");
+  label.textContent = `${path} · ${formatBytes(bytes)}`;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "upload-chip-remove";
+  remove.title = "不随这条消息发送";
+  remove.textContent = "×";
+  remove.addEventListener("click", () => removePendingImage(item));
+  chip.append(img, label, remove);
+  els.uploadChips.appendChild(chip);
+}
+
+function removePendingImage(item) {
+  pendingImages = pendingImages.filter((entry) => entry !== item);
+  const chip = Array.from(els.uploadChips.querySelectorAll(".upload-chip")).find(
+    (node) => node.dataset.path === item.path
+  );
+  if (chip) chip.remove();
+  if (!els.uploadChips.children.length) els.uploadChips.hidden = true;
+}
+
+/** 一条消息发出去之后，附件状态清空（图片本身仍留在工作目录里）。 */
+function clearPendingImages() {
+  pendingImages = [];
+  els.uploadChips.innerHTML = "";
+  els.uploadChips.hidden = true;
 }
 
 /** 上传成功后挂一个小标签，点开就能看内容。 */

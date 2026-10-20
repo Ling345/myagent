@@ -12,6 +12,7 @@ from agentcode.core.context import RunContext
 from agentcode.core.errors import LLMError
 from agentcode.core.registry import register_agent
 from agentcode.core.result import AgentResult, Step
+from agentcode.llm.attachments import user_content
 
 _NO_IMPROVEMENT_MARKERS = ("无需改进", "无需修改", "no need for improvement")
 
@@ -44,7 +45,10 @@ class ReflectionAgent(BaseAgent):
                 [
                     {
                         "role": "user",
-                        "content": REFLECTION_INITIAL_TEMPLATE.format(task=task, history=history),
+                        "content": user_content(
+                            REFLECTION_INITIAL_TEMPLATE.format(task=task, history=history),
+                            ctx.images,
+                        ),
                     }
                 ],
                 ctx,
@@ -68,7 +72,10 @@ class ReflectionAgent(BaseAgent):
                     [
                         {
                             "role": "user",
-                            "content": REFLECTION_CRITIQUE_TEMPLATE.format(task=task, code=current),
+                            "content": user_content(
+                                REFLECTION_CRITIQUE_TEMPLATE.format(task=task, code=current),
+                                ctx.images,
+                            ),
                         }
                     ],
                     ctx,
@@ -100,8 +107,14 @@ class ReflectionAgent(BaseAgent):
                     [
                         {
                             "role": "user",
-                            "content": REFLECTION_REFINE_TEMPLATE.format(
-                                task=task, last_code=current, feedback=feedback, history=history
+                            "content": user_content(
+                                REFLECTION_REFINE_TEMPLATE.format(
+                                    task=task,
+                                    last_code=current,
+                                    feedback=feedback,
+                                    history=history,
+                                ),
+                                ctx.images,
                             ),
                         }
                     ],

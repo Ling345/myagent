@@ -324,6 +324,16 @@ class SessionStore:
             self._persist(record)
             return True
 
+    def forget_agent(self, session_id: str) -> None:
+        """丢掉会话缓存的智能体实例（下次 get 会按新配置重建并恢复记忆）。
+
+        带图的请求要换成视觉后端，不能沿用上一次按文本模型建的实例。
+        """
+        with self._lock:
+            record = self._sessions.get(str(session_id or ""))
+            if record is not None:
+                record.agent = None
+
     # --------------------------------------------------------------- 对话
 
     def append_message(

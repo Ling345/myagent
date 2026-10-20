@@ -12,6 +12,7 @@ from agentcode.core.parsing import parse_plan
 from agentcode.core.registry import register_agent
 from agentcode.core.result import AgentResult, Step
 from agentcode.llm.base import LLMReply, Message
+from agentcode.llm.attachments import user_content
 from agentcode.llm.structured import PLAN_SCHEMA, ask_json
 
 #: 「调用模型并累计用量」的函数签名，由 BaseAgent._think 提供
@@ -43,14 +44,20 @@ class Planner:
         带着问题再问一次。
         """
         prompt = PLANNER_PROMPT_TEMPLATE.format(question=question, history=history)
+        messages = [{"role": "user", "content": user_content(prompt, ctx.images)}]
         if self._complete is not None:
-            steps = self._try_structured([{"role": "user", "content": prompt}])
+            steps = self._try_structured(messages)
             if steps:
                 return steps
-            retry_messages = [{"role": "user", "content": prompt + _PLAN_RETRY_HINT}]
+            retry_messages = [
+                {
+                    "role": "user",
+                    "content": user_content(prompt + _PLAN_RETRY_HINT, ctx.images),
+                }
+            ]
             if self._complete is not None:
                 return self._try_structured(retry_messages)
-        raw = self._think([{"role": "user", "content": prompt}], ctx)
+        raw = self._think(messages, ctx)
         return parse_plan(raw)
 
     def _try_structured(self, messages: Sequence[Message]) -> list[str]:
@@ -84,7 +91,9 @@ class Executor:
                 progress=progress or "（暂无）",
                 current_step=step,
             )
-            result = self._think([{"role": "user", "content": prompt}], ctx)
+            result = self._think(
+                [{"role": "user", "content": user_content(prompt, ctx.images)}], ctx
+            )
             progress += f"步骤 {index}: {step}\n结果: {result}\n\n"
             final_answer = result
             ctx.add_step(

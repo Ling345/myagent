@@ -51,6 +51,9 @@
 >
 > 阶段十三进行中：**对外开放 API**（API 令牌 + `POST /v1/run` / `GET /v1/me`，
 > 让脚本和 CI 也能用，用量记进同一本账）。详见 [`docs/api.md`](docs/api.md)。
+>
+> 阶段十四进行中：**图片输入**（上传 → 消息缩略图 → OpenAI `image_url` 内容块 + 视觉档位）。
+> 详见「上传文件」一节。
 
 内置四种智能体：
 
@@ -533,11 +536,23 @@ D:\Anaconda\python.exe -m agentcode user disable bob         # 停用（欠费/�
 
 | 约定 | 值 |
 | --- | --- |
-| 类型 | 只收 **UTF-8 文本**；含 NUL 字节的当二进制拒掉（`read_file` 也只读文本，二进制对 agent 没用） |
+| 类型 | **UTF-8 文本**，或 **PNG / JPEG / GIF / WebP 图片**（按文件头判断，扩展名说了不算）；其它二进制拒掉 |
 | 单个文件 | 2 MB（`AGENT_UPLOAD_MAX_BYTES`） |
 | 每人总量 | 50 MB（`AGENT_UPLOAD_QUOTA_BYTES`） |
 | 同名文件 | 覆盖；覆盖**不计入**新增配额，否则用户改不了自己那个文件 |
 | 文件名 | 只取最后一段，`\` 与 `/` 都当分隔符（Windows 与 Linux 都要挡），`.` 与 `..` 直接拒 |
+
+**图片输入**：传图片时会显示缩略图；发送消息时图片随任务一起带给模型，消息里也能看到缩略图。
+一次最多 4 张，单张沿用 2 MB 上限。模型侧按 OpenAI 兼容的 `image_url` 内容块发送，不是把
+图片路径塞进文字让模型猜。
+
+真实模型必须支持视觉，否则入口会直接拒绝（免得供应商回一个看不懂的 400）：
+
+- 配了多模型档位：`AGENT_VISION_PROFILE=vision`，档位本身指向支持图片的模型；
+- 单模型本身就是视觉模型：`AGENT_MODEL_VISION=true`。
+
+`AGENT_VISION_PROFILE` 这一档（以及它的 `fallback`）里的模型都要支持图片。演示模式（mock）
+不需要视觉模型，会回一条"收到 N 张图片"的回执，用来验证上传与传输链路。
 
 > **每个账号一个代码目录**。会话目录一直是按账号分的，代码目录**曾经是全局共享的**——
 > 也就是说 A 让 agent 写进去的文件，B 换个账号就能读到。这个洞在上传功能之前先堵上了：
@@ -830,6 +845,8 @@ def add(a: str, b: str) -> str:
 | `AGENT_ALERT_ERROR_RATE` | 否 | `0.5` | 错误率阈值 |
 | `AGENT_UPLOAD_MAX_BYTES` | 否 | `2097152` | 单个上传文件的上限（2 MB） |
 | `AGENT_UPLOAD_QUOTA_BYTES` | 否 | `52428800` | 每个用户代码目录的总量上限（50 MB） |
+| `AGENT_VISION_PROFILE` | 否 | 空 | 带图请求使用的模型档位（必须支持视觉） |
+| `AGENT_MODEL_VISION` | 否 | `false` | 默认单模型本身支持图片时置 `true` |
 | `AGENT_METRICS_TOKEN` | 否 | 无 | 抓指标用的令牌；容器里必须绑 0.0.0.0，靠它免登录抓取 |
 | `AGENT_RETENTION_DAYS` | 否 | `0` | 会话与代码文件留多少天；`0` = 不自动清理 |
 | `AGENT_API_ENABLED` | 否 | `true` | 对外 API 开关；`false` 时 `/v1/*` 一律 404 |

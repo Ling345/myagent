@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import threading
@@ -243,3 +244,41 @@ def test_the_server_decides_the_model_not_the_caller(web):
 
     assert status == 200
     assert payload["llm_mode"] == "mock"  # 服务端跑的是 mock，就不许被改
+
+
+# ------------------------------------------------------------------ 图片
+
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def test_run_accepts_images_from_the_account_workspace(web):
+    base, accounts, account, tmp_path = web
+    token = _token(accounts, account)
+    root = tmp_path / "sandbox" / account.id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "shot.png").write_bytes(PNG_BYTES)
+
+    status, payload = _request(
+        base,
+        "/v1/run",
+        token=token,
+        payload={"task": "这张图是什么？", "images": ["shot.png"]},
+    )
+
+    assert status == 200
+    assert "1 张图片" in payload["answer"]
+
+
+def test_run_rejects_an_image_outside_the_account_workspace(web):
+    base, accounts, account, tmp_path = web
+    token = _token(accounts, account)
+    (tmp_path / "shot.png").write_bytes(PNG_BYTES)
+
+    status, payload = _request(
+        base, "/v1/run", token=token, payload={"task": "看图", "images": ["../shot.png"]}
+    )
+
+    assert status == 400
+    assert "路径" in payload["error"]
