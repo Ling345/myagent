@@ -1398,3 +1398,271 @@ button:disabled {
   padding: 4px 0;
   border-top: 1px solid rgba(63, 92, 240, 0.08);
 }
+
+/* ------------------------------------------------- 运行追踪页（排查视图）
+   和对话页共用底色/面板；只是把一次运行的事件流画成时间线。
+   普通对话页仍然只给结果，这个页面是专门给排查用的。 */
+
+.tr-body {
+  overflow: auto;
+}
+
+.tr-page {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  padding: 28px clamp(16px, 4vw, 44px) 48px;
+}
+
+.tr-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.tr-page-head h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+}
+
+.tr-sub {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.tr-back {
+  color: var(--accent);
+  font-size: 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.tr-back:hover {
+  text-decoration: underline;
+}
+
+.tr-layout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 20px;
+  align-items: start;
+}
+
+.tr-column {
+  padding: 14px 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  backdrop-filter: blur(10px);
+}
+
+.tr-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tr-runs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tr-refresh {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tr-refresh:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
+.tr-run {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tr-run span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tr-run:hover {
+  border-color: var(--accent-line);
+}
+
+.tr-run.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.tr-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  word-break: break-word;
+}
+
+.tr-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tr-step {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+}
+
+.tr-step[data-error="1"] {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.tr-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tr-index {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.tr-action {
+  flex: 1;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.tr-ms {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tr-fold {
+  margin-top: 6px;
+}
+
+.tr-fold summary {
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tr-text {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.tr-tool {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.tr-tool-name {
+  padding: 1px 8px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.tr-tool-input {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.tr-observation {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(31, 35, 41, 0.04);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.tr-final {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.tr-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.tr-answer {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+}
+
+.tr-answer-ok {
+  color: #178f5a;
+}
+
+.tr-answer-bad {
+  color: var(--danger);
+}
+
+.tr-answer-text {
+  margin: 8px 0;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 1080px) {
+  .tr-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
