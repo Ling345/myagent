@@ -18,9 +18,9 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 本地路径 | `D:\agent\agentcode-homework1` |
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v8**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
-| 代码量 | `agentcode/` 约 1.32 万行 Python；76 个测试文件 |
-| 测试 | **942 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
-| 提交 | 94 次；PR #1–#17、#18、#19 已合并（#2 是重复提交，已关闭未合并） |
+| 代码量 | `agentcode/` 约 1.37 万行 Python；77 个测试文件 |
+| 测试 | **953 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
+| 提交 | 95 次；PR #1–#17、#18、#19、#20 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -70,7 +70,8 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | #17 | 任务完成回调：签名 + 失败重试 + 防 SSRF（迁移 v8，`docs/api.md` 第 5 节） |
 | #18 | 原生工具调用（JSON Schema + `tool_calls`）+ 结构化输出（`llm/structured.py`），带自动回退 |
 | #19 | 多模型档位与跨供应商降级（`llm/routing.py`、`configs/models.example.json`） |
-| #20 | 提示词前缀稳定（稳定 system 块 + 变化 user 块）+ 缓存命中 token 解析与指标 |
+| （直推 main） | 提示词前缀稳定（稳定 system 块 + 变化 user 块）+ 缓存命中 token 解析与指标（`ba21970`） |
+| #20 | 对外流式：`/v1/run` 的 SSE + OpenAI 兼容 `/v1/chat/completions`（含流式）+ `GET /v1/models` |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
@@ -112,6 +113,12 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 - `GET /v1/me`：套餐、今日用量、剩余额度；
 - 计费：与网页/CLI **同一本账**（`usage_ledger`），按输入/输出分开记；
 - 开关：`AGENT_API_ENABLED=false` 可整体关掉（`/v1/*` 回 404）。
+- **流式**：`POST /v1/run` 带 `"stream": true` → SSE（`start` → `status`/`step` → `answer` → `done`），
+  与 `async` 互斥；客户端断开不会终止任务（剩下的照跑、账照记）。
+- **OpenAI 兼容**：`POST /v1/chat/completions`（非流式/流式）与 `GET /v1/models`。
+  最后一条 `user` 消息是任务，之前的 user/assistant 配对还原成短期记忆；
+  `system` 被忽略（智能体纪律不允许调用方覆盖）；可选扩展字段 `agent`。
+  流式是**步骤级 + 最终答案一次给**，不是 token 级。
 
 ## 5. 还没做的（下一步候选）
 
@@ -123,7 +130,6 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 真支付接入 | 订单现在是人工确认（`billing confirm`） | 与定价策略相关，用户之前说先放一放 |
 | 团队协作 | `team` 套餐目前只是额度更大，没有成员管理 | 卖团队客户时迟早要有 |
 | ICP 备案 / 数据出境评估 | 合规前置条件 | 非代码事项，见 `docs/data-and-privacy.md` |
-| 对外流式（SSE / OpenAI 兼容） | 客户端与 IDE 接入的门槛项 | 网页有 SSE，`/v1/*` 没有 |
 | 多模态输入（图片/PDF） | 现在只收文本、单文件 2 MB | 有"看图"需求再做 |
 | 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
 | MCP（接别人的工具 + 把自己暴露成 MCP server） | 工具生态入口，一次投入长期受益 | 工具现在写死在 `tools/` |
@@ -207,6 +213,12 @@ launch_chrome_cdp.ps1 + verify_*.mjs（真浏览器验证）
   稳定块，历史/步骤/任务只能进 user 块——混了就等于把 prompt cache 关掉。
 - **缓存命中数不是每家都给**：DeepSeek 给 `prompt_cache_hit_tokens`，OpenAI 给
   `prompt_tokens_details.cached_tokens`；都没有时 `usage` 里不会出现这两个键（别在界面里假定有）。
+- **`/v1/run` 的 `stream` 与 `async` 互斥**：流式响应本身就是实时的，同时传直接 400；
+  客户端中途断开不会终止任务（`_iter_api_job` 照常跑完并结算）。
+- **chat completions 的 `system` 被忽略**：智能体的工具与纪律由服务端决定，
+  调用方不能通过 system 消息把它们关掉（这是刻意的）。
+- **流式是步骤级**：每个工具调用结束推一条，最终答案在 `answer` / 最后一个 chunk 一次给出；
+  逐 token 输出要模型后端支持回调，当前没做。
 
 ## 9. 这个项目的约定（别破坏）
 

@@ -961,7 +961,7 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 - 后端由服务端决定，调用方不能在请求里挑 `mock` 去拿假答案；
 - 不想对外开放就设 `AGENT_API_ENABLED=false`，`/v1/*` 一律 404。
 
-完整的字段表、错误码、Python / GitHub Actions 示例、以及"现在还没有的"（流式、
+完整的字段表、错误码、Python / GitHub Actions 示例、以及"现在还没有的"（token 级流式、
 细分权限）都写在 **[`docs/api.md`](docs/api.md)** 里。
 
 长任务和重试都有对应手段：
@@ -973,7 +973,11 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 - **回调**：异步任务多给一个 `callback_url`，跑完主动 POST 结果过去，不用轮询。
   签名防伪造（HMAC-SHA256）、失败按退避重试且跨重启接着发、地址逐条查内网防 SSRF；
   投递状态在 `GET /v1/runs/<id>` 的 `callback` 块里，收不到时看
-  `agentcode api callbacks <账号>`（细节见 [`docs/api.md`](docs/api.md) 第 5 节）；
+  `agentcode api callbacks <账号>`（细节见 [`docs/api.md`](docs/api.md) 第 6 节）；
+- **流式**：`{"stream": true}` 把响应变成 SSE（`start` / `status` / `step` / `answer` / `done`），
+  边跑边推；客户端中途断开也不会终止任务。
+  另有 **OpenAI 兼容**的 `POST /v1/chat/completions`（含流式）和 `GET /v1/models`，
+  可以直接接 Cursor / IDE 这类只认 OpenAI 协议的客户端（细节见 `docs/api.md` 第 5 节）；
 - 运维侧查"用户说任务一直没结果"：`agentcode api list <账号>`（那一行会标出回调状态）。
 
 ## 备份与恢复

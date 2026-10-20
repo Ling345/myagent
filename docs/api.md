@@ -45,8 +45,9 @@ Authorization: Bearer agk_xxxxxxxxxxxxxxxxxxxxxxxx
 | `session_id` | 否 | 带上它就**延续同一个会话**（上下文记忆会在两次调用之间保留） |
 | `max_steps` | 否 | 本轮最多跑几步；不填按服务端配置 |
 | `async` | 否 | `true` 时立刻返回 `202` + `run_id`，任务在后台跑（见第 4 节） |
+| `stream` | 否 | `true` 时响应变成 SSE 事件流，边跑边推（见第 5 节）；与 `async` 互斥 |
 
-请求头还可以带一个 **`Idempotency-Key`**（见第 6 节）：网络抖动重发时，
+请求头还可以带一个 **`Idempotency-Key`**（见第 7 节）：网络抖动重发时，
 同一个键只会跑一次、只扣一次费。
 
 ```bash
@@ -121,9 +122,62 @@ curl -sS "$AGENTCODE_URL/v1/runs/9f2c…" -H "Authorization: Bearer $AGENTCODE_T
   并写明原因——不会让你一直轮询一个死任务。
 
 轮询是能用，但一直轮询不优雅：不想轮询就配一个 `callback_url`，我们跑完
-主动 POST 给你（第 5 节）。
+主动 POST 给你（第 6 节）。
 
-## 5. 任务完成回调：跑完主动通知你
+## 5. 流式：边跑边看
+
+长任务有两种"不等整单跑完"的用法，按你接的东西选。
+
+### 5.1 自己的事件流：`POST /v1/run` + `"stream": true`
+
+```bash
+curl -N -sS -X POST "$AGENTCODE_URL/v1/run" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"agent": "coding", "task": "给 utils.py 补测试", "stream": true}'
+```
+
+响应是 `text/event-stream`，事件按发生顺序推送：
+
+| 事件 | 内容 |
+| --- | --- |
+| `start` | `run_id` / `agent` / `session_id` |
+| `status` | 正在调用模型 / 正在调用某个工具（给人看的进度） |
+| `step` | 一条完成的步骤（思考、行动、工具、观察、耗时） |
+| `answer` | 最终结果（和同步接口的返回体一样） |
+| `done` | 收尾：`run_id`、`status`、`success`、`answer`、`usage`、`elapsed_ms` |
+
+几个要知道的点：
+
+- **`stream` 与 `async` 不能同时用**（流式响应本身就是实时的），同时传回 `400`；
+- 中途断开**不会**终止任务：剩下的单照跑、账照记，事后还能用 `GET /v1/runs/<id>` 查；
+- 流是**步骤级**的：每个工具调用结束时推一条，最终答案在 `answer` 里一次性给出
+  （token 级流式取决于模型后端，当前没做）；
+- 用量、限流、幂等键、配额都走和同步接口同一条链路。
+
+### 5.2 OpenAI 兼容：`POST /v1/chat/completions`
+
+给 Cursor / IDE / 任何"只认 OpenAI 协议"的客户端用：
+
+```bash
+curl -sS -X POST "$AGENTCODE_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $AGENTCODE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"model": "agentcode", "messages": [{"role": "user", "content": "你好"}]}'
+```
+
+返回标准形状（`object: chat.completion`、`choices[].message.content`、`usage`）；
+加 `"stream": true` 则按 OpenAI 的 chunk 形状逐条推送，最后以 `data: [DONE]` 结束。
+
+映射规则：
+
+- **最后一条 `user` 消息就是本次任务**；它之前的 `user`/`assistant` 配对会还原成
+  短期记忆（OpenAI 协议是无状态的，客户端每次带全量对话，这里负责接上多轮）；
+- `system` 消息被忽略：智能体的系统提示词（工具、纪律）由服务端决定，调用方不能覆盖；
+- `model` 只用于回显（服务端用自己配置的模型）；`temperature` 会透传给本次运行；
+- 可选扩展字段 `agent` 指定用哪个智能体（默认 `react`），例如 `"agent": "coding"`。
+
+另外 `GET /v1/models` 返回当前配置的模型（含多模型档位），很多客户端连上来会先探这个。
+
+## 6. 任务完成回调：跑完主动通知你
 
 提交异步任务时多给一个 `callback_url`，任务一结束我们就带着结果 POST 过去，
 调用方"发完就走"：
@@ -232,7 +286,7 @@ D:\Anaconda\python.exe -m agentcode api callbacks alice
 本地开发要回调自己机器上的接收端时，把 `AGENT_CALLBACK_ALLOW_PRIVATE=true` 打开。
 **公网部署别开**。
 
-## 6. 幂等键：重发不等于重跑
+## 7. 幂等键：重发不等于重跑
 
 客户端超时之后最常见的做法是"原样重发一次"。带 `Idempotency-Key` 就不会变成
 "跑两次、扣两次"：
@@ -255,7 +309,7 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 键由你自己定，建议带上业务上下文（比如 CI 的 run id）。**不要**用随机数——
 那就等于没带。同一个键最多保留 `AGENT_API_RUNS_DAYS` 天。
 
-## 7. 错误码
+## 8. 错误码
 
 | 状态码 | 什么意思 | 该怎么办 |
 | --- | --- | --- |
@@ -266,7 +320,7 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 | `429` | 请求太频 / 并发太多 | 退避重试；响应里有 `Retry-After` |
 | `502` | 任务没跑成功（模型侧错误、超出单次预算等） | 看 `error` 字段；可以重试 |
 
-## 8. 限流与计费
+## 9. 限流与计费
 
 - **计费**：按这次运行真实消耗的 token 记账，输入/输出分开记（两者单价差好几倍）。
   和网页、CLI 走的是**同一本账**——`agentcode billing costs` 里能一起看到。
@@ -275,7 +329,7 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
 - **上限**：每日 token 额度、每分钟请求数、并发数、单次运行 token 预算，
   都在服务端 `.env` 里配（见 `README.md` 的「配置说明」）。
 
-## 9. 脚本示例
+## 10. 脚本示例
 
 ### Python
 
@@ -319,7 +373,7 @@ print(data["answer"], data["usage"])
 
 令牌放进仓库的 **Secrets**，不要写进 workflow 文件。
 
-## 10. 安全
+## 11. 安全
 
 - 令牌等同密码：**只放环境变量或 secret**，不要提交进仓库、不要贴进聊天记录。
 - 泄露了就**立刻吊销**（网页「我的数据」或 `agentcode token revoke`），
@@ -329,11 +383,11 @@ print(data["answer"], data["usage"])
   （`agentcode audit list --action-prefix api.`）。审计里永远没有令牌明文。
 - 对外提供服务时请务必用 **HTTPS**：明文 HTTP 会让令牌在网络里裸奔。
 
-## 11. 现在还没有的（诚实列一下）
+## 12. 现在还没有的（诚实列一下）
 
 | 缺什么 | 影响 |
 | --- | --- |
-| 流式接口 | 网页有 SSE，对外还没开；需要边跑边看的话请提需求 |
+| token 级流式 | 现在的流式是**步骤级**（每个工具调用推一条，答案一次给）；逐 token 输出取决于模型后端 |
 | 按接口细分的权限 | 一把令牌能调全部接口；要"只读令牌"之类的还得再做 |
 
 这些都在路线图上，但**没做就是没做**——上面这些坑请先自己绕过去。

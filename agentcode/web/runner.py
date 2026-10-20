@@ -146,6 +146,7 @@ def create_backend(
     llm_mode: str,
     settings: Settings,
     max_steps: int | None = None,
+    memory: ShortTermMemory | None = None,
 ) -> BaseAgent:
     """装配一个智能体实例（模型、工具与上下文记忆；中间件随后注入）。"""
     if llm_mode == "mock":
@@ -161,7 +162,8 @@ def create_backend(
         agent_name,
         llm=llm,
         tools=tools,
-        memory=ShortTermMemory(max_turns=settings.memory_turns),
+        # 传入记忆就用它（OpenAI 兼容接口会从这里恢复多轮对话），否则新建一份
+        memory=memory if memory is not None else ShortTermMemory(max_turns=settings.memory_turns),
         max_steps=max_steps or settings.max_steps_for(agent_name),
         tool_calling=settings.tool_calling,
     )
@@ -176,11 +178,15 @@ def run_stream(
     settings: Settings | None = None,
     session_store: SessionStore | None = None,
     session_id: str | None = None,
+    memory: ShortTermMemory | None = None,
 ) -> Iterator[Event]:
     """在后台线程里执行智能体，把事件按发生顺序逐条产出。
 
     带上 ``session_store`` 与 ``session_id`` 时复用同一个智能体实例（记忆延续），
     并把这一问一答记进会话记录，方便之后切回来看。
+
+    ``memory`` 用于"从外面把之前的对话塞进来"（OpenAI 兼容接口是无状态的，
+    客户端每次带全量 messages，我们把它还原成短期记忆）。
     """
     events: queue.Queue[Event | None] = queue.Queue()
 
@@ -203,7 +209,9 @@ def run_stream(
                 )
                 session_store.append_message(session_id, "user", task)
             else:
-                agent = create_backend(agent_name, llm_mode, active_settings, max_steps)
+                agent = create_backend(
+                    agent_name, llm_mode, active_settings, max_steps, memory=memory
+                )
 
             # 中间件绑定本次请求的事件出口，所以每次请求都换一套
             agent.middlewares = build_middlewares(emit, active_settings)
