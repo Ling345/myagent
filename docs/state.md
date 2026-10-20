@@ -18,9 +18,9 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 本地路径 | `D:\agent\agentcode-homework1` |
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v8**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
-| 代码量 | `agentcode/` 约 1.37 万行 Python；78 个测试文件 |
-| 测试 | **958 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
-| 提交 | 96 次；PR #1–#17、#18、#19、#20、#21 已合并（#2 是重复提交，已关闭未合并） |
+| 代码量 | `agentcode/` 约 1.41 万行 Python；80 个测试文件 |
+| 测试 | **982 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
+| 提交 | 97 次；PR #1–#22 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -74,6 +74,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | （直推 main） | 提示词前缀稳定（稳定 system 块 + 变化 user 块）+ 缓存命中 token 解析与指标（`ba21970`） |
 | #20 | 对外流式：`/v1/run` 的 SSE + OpenAI 兼容 `/v1/chat/completions`（含流式）+ `GET /v1/models` |
 | #21 | 运行追踪页 `/trace`：把一次运行的事件流画成时间线（工具/观察/耗时/答案） |
+| #22 | 图片输入：上传识别 + 缩略图 + `image_url` 内容块 + 视觉档位（`llm/attachments.py`） |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
@@ -103,6 +104,25 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
   （OpenAI）解析，进 `usage.cache_hit_tokens` / `usage.cache_miss_tokens` 与指标
   `agentcode_prompt_cache_tokens_total{result=hit|miss}`。
 
+## 3.2 图片输入现状（PR #22）
+
+- 入口：网页「上传文件」/拖拽、`POST /api/upload`、`POST /v1/run` 的 `images` 数组；
+  OpenAI 兼容的 `POST /v1/chat/completions` 还能直接收 `image_url` 内容块（**只收
+  base64 data URL**，远程 http(s) 不代取，避免 SSRF）。
+- 识别：按文件头认 PNG / JPEG / GIF / WebP，不信扩展名；一次最多 4 张，单张沿用
+  2 MB（`AGENT_UPLOAD_MAX_BYTES`）；图片同样计入每用户目录配额。
+- 发送：`llm/attachments.py` 把图片转成 `{"type": "image_url", "image_url": {"url": "data:..."}}`，
+  与文字一起组成 user 内容的块数组；没有图片时仍发纯字符串（老路径不变）。
+  react / coding / test_gen / reflection / plan_and_solve 都带上图片。
+- 路由：带图请求用 `AGENT_VISION_PROFILE` 指定的档位；单模型本身是视觉模型时置
+  `AGENT_MODEL_VISION=true`。两者都没配 → 入口直接 400，**不会**把图片悄悄发给文本模型。
+  该档位的 `fallback` 链也必须支持视觉。
+- 会话：带图时会丢掉缓存的智能体实例（`SessionStore.forget_agent`），按视觉后端重建并从
+  记录恢复记忆；图片本身不进短期记忆，历史轮次只留 `[图片]` 占位。
+- 演示：mock 模式不需要视觉模型，回执写"收到 N 张图片（演示模式，不做真实识别）"。
+- 用量估算：图片块按固定 2000 字符折算，不把 base64 长度当 token（否则 2 MB 图片会
+  "算"出几十万 token，直接撑爆预算）。
+
 ## 4. 对外 API 现状（`docs/api.md` 是用户文档）
 
 - 认证：`Authorization: Bearer agk_...`，令牌只存 sha256，明文只在创建时出现一次；
@@ -126,13 +146,12 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 
 | 事 | 为什么值得做 | 备注 |
 | --- | --- | --- |
-| 流式接口 | 网页有 SSE，对外没开 | 适合聊天式集成 |
 | 细分权限 | 现在一把令牌能调全部接口 | 例如只读令牌 |
 | 邮箱"点链接验证" | 现在只做格式校验，填错也存得下 | 需要稳定发信能力 |
 | 真支付接入 | 订单现在是人工确认（`billing confirm`） | 与定价策略相关，用户之前说先放一放 |
 | 团队协作 | `team` 套餐目前只是额度更大，没有成员管理 | 卖团队客户时迟早要有 |
 | ICP 备案 / 数据出境评估 | 合规前置条件 | 非代码事项，见 `docs/data-and-privacy.md` |
-| 多模态输入（图片/PDF） | 现在只收文本、单文件 2 MB | 有"看图"需求再做 |
+| PDF 输入 | 图片已支持；PDF 还没接 | 抽文本或逐页转图，先定取舍 |
 | 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
 | MCP（接别人的工具 + 把自己暴露成 MCP server） | 工具生态入口，一次投入长期受益 | 工具现在写死在 `tools/` |
 | 评测与回归（黄金集 + LLM-as-judge） | "敢改提示词"的前提 | 现在没有 eval 工具 |
@@ -226,6 +245,10 @@ launch_chrome_cdp.ps1 + verify_*.mjs（真浏览器验证）
   `api_runs` 台账；要"历史回放"得先把事件落盘（未做）。
 - **每步 token 还没有**：追踪页给的是每步耗时 + 运行级 usage；把 token 归因到单步
   需要在中间件里记增量再挂到 Step 上（未做）。
+- **图片不落会话记录**：会话里只存文字，刷新页面后历史消息的缩略图不会重建
+  （图片文件仍在工作目录里）。要"回看附件"得给消息表加列并做迁移。
+- **chat 接口的请求体上限是 12 MB**（`MAX_CHAT_BODY_BYTES`），其余接口仍是 64 KB；
+  改成内联图片后别再把全局上限当成图片上限。
 
 ## 9. 这个项目的约定（别破坏）
 

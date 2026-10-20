@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-import ipaddress
+import base64
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -15,9 +16,10 @@ import threading
 import time
 import uuid
 import webbrowser
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, quote, urlsplit
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
@@ -31,6 +33,13 @@ from agentcode.config import (
 from agentcode.core.registry import default_registry
 from agentcode.core.errors import AgentCodeError
 from agentcode.lifecycle import code_root_for
+from agentcode.llm.attachments import (
+    MAX_IMAGES,
+    MAX_IMAGE_BYTES,
+    VISION_REQUIRED,
+    make_attachment,
+    sniff_image_media_type,
+)
 from agentcode.memory.short_term import ShortTermMemory
 from agentcode.metrics import HTTP_REQUESTS, HTTP_SECONDS, METRICS, REJECTIONS
 from agentcode.plans import get_plan
@@ -52,6 +61,8 @@ from agentcode.web.sessions import SessionStore, default_session_dir
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 64 * 1024
+#: OpenAI 兼容接口允许内联 base64 图片：4 张 × 2 MB × 4/3 再留点余量
+MAX_CHAT_BODY_BYTES = 12 * 1024 * 1024
 #: 单个文件的内容最多返回这么多字符（够看代码，又不至于撑爆前端）
 MAX_FILE_CHARS = 20000
 #: 不需要登录也能访问的路径（登录页本身是静态资源）
@@ -149,40 +160,117 @@ def chat_messages_to_task(messages: Any) -> tuple[str, ShortTermMemory]:
     - ``system`` 消息暂时忽略（各智能体的系统提示词由服务端决定，
       不允许调用方覆盖——否则等于把纪律关掉）。
     """
+    parsed = parse_chat_messages(messages)
+    return parsed.task, parsed.memory
+
+
+@dataclass
+class ChatInput:
+    """OpenAI chat 请求解析后的一次任务：文字 + 记忆 + 图片。"""
+
+    task: str
+    memory: ShortTermMemory
+    images: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _chat_content(content: Any, *, keep_images: bool) -> tuple[str, list[dict[str, Any]]]:
+    """拆开一条消息的 content（字符串或多段内容块）。
+
+    历史轮次里的图片不再转发（``keep_images=False``），只留一个
+    ``[图片]`` 占位——记忆是给模型看上下文的，不是重放附件。
+    """
+    if isinstance(content, str):
+        return content, []
+    if not isinstance(content, list):
+        raise AgentCodeError("content 必须是字符串，或 text / image_url 内容块数组。")
+    texts: list[str] = []
+    images: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            raise AgentCodeError("content 里的每一段都必须是对象。")
+        kind = str(part.get("type") or "").strip()
+        if kind == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise AgentCodeError("text 内容块的 text 必须是字符串。")
+            texts.append(text)
+            continue
+        if kind != "image_url":
+            raise AgentCodeError(f"不支持的内容块类型：{kind or '（空）'}。")
+        if not keep_images:
+            texts.append("[图片]")
+            continue
+        images.append(_image_from_part(part, len(images) + 1))
+    return "\n".join(texts), images
+
+
+def _image_from_part(part: Mapping[str, Any], index: int) -> dict[str, Any]:
+    """把 OpenAI 的 ``image_url`` 内容块解析成附件（只收 base64 data URL）。"""
+    raw_url = part.get("image_url")
+    url = raw_url.get("url") if isinstance(raw_url, Mapping) else raw_url
+    if not isinstance(url, str) or not url.startswith("data:"):
+        raise AgentCodeError(
+            "image_url 只支持 data: URL（base64 内联图片）；远程 http(s) 地址不代取，"
+            "免得服务端被当成内网探针。"
+        )
+    header, _, payload = url.partition(",")
+    if ";base64" not in header or not payload:
+        raise AgentCodeError("image_url 的 data: URL 必须是 base64 编码。")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise AgentCodeError("image_url 里的 base64 解不开。") from exc
+    media_type = sniff_image_media_type(raw)
+    if media_type is None:
+        raise AgentCodeError("image_url 不是支持的图片（只收 PNG / JPEG / GIF / WebP）。")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise AgentCodeError(
+            f"图片太大（{len(raw)} 字节，单张上限 {MAX_IMAGE_BYTES // 1024} KB）。"
+        )
+    return make_attachment(f"image-{index}", raw, media_type)
+
+
+def parse_chat_messages(messages: Any) -> ChatInput:
+    """把 OpenAI 客户端的全量对话映射成一次任务（支持多段 content）。"""
     if not isinstance(messages, list) or not messages:
         raise AgentCodeError("messages 不能为空。")
-    cleaned: list[dict[str, str]] = []
+    cleaned: list[tuple[str, Any]] = []
     for item in messages:
         if not isinstance(item, Mapping):
             raise AgentCodeError("messages 里每一条都必须是对象。")
         role = str(item.get("role") or "").strip().lower()
-        content = item.get("content")
         if role not in {"system", "user", "assistant"}:
             raise AgentCodeError(f"不支持的消息角色：{role or '（空）'}。")
-        if not isinstance(content, str):
-            raise AgentCodeError("content 必须是字符串（本接口暂不支持多段内容）。")
-        cleaned.append({"role": role, "content": content})
-    if cleaned[-1]["role"] != "user":
+        cleaned.append((role, item.get("content")))
+    if cleaned[-1][0] != "user":
         raise AgentCodeError("最后一条消息必须是 role=user。")
-    task = cleaned[-1]["content"].strip()
-    if not task:
+
+    task, images = _chat_content(cleaned[-1][1], keep_images=True)
+    task = task.strip()
+    if not task and not images:
         raise AgentCodeError("最后一条 user 消息不能为空。")
+    if not task:
+        task = "请描述这张图片。"
+    if len(images) > MAX_IMAGES:
+        raise AgentCodeError(f"一次最多带 {MAX_IMAGES} 张图片，收到 {len(images)} 张。")
+
     memory = ShortTermMemory(max_turns=max(1, len(cleaned)))
     pending_user = ""
-    for item in cleaned[:-1]:
-        if item["role"] == "system":
+    for role, content in cleaned[:-1]:
+        text, _ = _chat_content(content, keep_images=False)
+        if role == "system":
             continue
-        if item["role"] == "user":
-            pending_user = item["content"]
+        if role == "user":
+            pending_user = text
         elif pending_user:
             memory.add_turn(
                 [
                     {"role": "user", "content": pending_user},
-                    {"role": "assistant", "content": item["content"]},
+                    {"role": "assistant", "content": text},
                 ]
             )
             pending_user = ""
-    return task, memory
+    return ChatInput(task=task, memory=memory, images=images)
 
 
 def safe_upload_name(raw: str) -> str | None:
@@ -210,6 +298,57 @@ def directory_size(root: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def collect_images(
+    settings: Settings,
+    raw: Any,
+    *,
+    require_vision: bool = True,
+) -> list[dict[str, Any]]:
+    """校验本次任务带的图片路径，并读成可发给模型的内容块。
+
+    只认调用者自己工作目录里的文件（``resolve_in_root`` 挡越界），按魔数
+    判断类型；任何一张不合格就整单拒绝——半张图发过去只会让模型看到
+    残缺内容，比直接说清楚更难排查。
+    """
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise AgentCodeError('images 必须是图片路径数组，例如 {"images": ["shot.png"]}。')
+    paths = [item.strip() for item in raw if item.strip()]
+    if not paths:
+        return []
+    if len(paths) > MAX_IMAGES:
+        raise AgentCodeError(f"一次最多带 {MAX_IMAGES} 张图片，收到 {len(paths)} 张。")
+    if require_vision and not (settings.vision_profile or settings.model_vision):
+        raise AgentCodeError(VISION_REQUIRED)
+
+    root = Path(settings.code_root)
+    images: list[dict[str, Any]] = []
+    for item in paths:
+        try:
+            target = resolve_in_root(root, item)
+        except ValueError as exc:
+            raise AgentCodeError(f"{exc}。图片必须是工作目录里的文件。") from exc
+        if not target.is_file():
+            raise AgentCodeError(f"找不到图片：{item}。请先上传。")
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            raise AgentCodeError(f"读不到图片 {item}：{exc}") from exc
+        if len(data) > settings.upload_max_bytes:
+            raise AgentCodeError(
+                f"图片太大：{item}（{len(data)} 字节，单张上限 "
+                f"{settings.upload_max_bytes // 1024} KB）。"
+            )
+        media_type = sniff_image_media_type(data)
+        if media_type is None:
+            raise AgentCodeError(
+                f"不是支持的图片：{item}（只收 PNG / JPEG / GIF / WebP）。"
+            )
+        images.append(make_attachment(item, data, media_type))
+    return images
 
 
 def scope_settings_for_plan(settings: Settings, plan_name: str | None) -> Settings:
@@ -478,13 +617,13 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         return Notifier(self.server.accounts, self._settings())  # type: ignore[attr-defined]
 
     def _handle_upload(self) -> None:
-        """收一个文本文件，存进调用者**自己**的代码工作目录。
+        """收一个文本文件或图片，存进调用者**自己**的代码工作目录。
 
-        约定（见 docs 里的设计）：只收文本、单文件有上限、每用户目录有总量上限、
-        文件名只取最后一段、同名覆盖。
+        约定（见 docs 里的设计）：收 UTF-8 文本与常见图片、单文件有上限、
+        每用户目录有总量上限、文件名只取最后一段、同名覆盖。
 
         走的是"原始 body"而不是 multipart：Python 3.13 已经把 ``cgi`` 删了，
-        而我们要的只是纯文本，原始 body 最省事也最不容易出差错。
+        而请求体本来就是单个文件，原始 body 最省事也最不容易出差错。
 
         注意顺序：**先把 body 读掉，再判登录**。不读就回 401 的话，客户端还在发
         数据、服务端已经关连接，浏览器拿到的是"连接被中止"而不是 401——
@@ -524,14 +663,22 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "文件名不合法。"}, status=400)
             return
 
-        try:
-            raw.decode("utf-8")
-        except UnicodeDecodeError:
-            self._send_json({"error": "只支持 UTF-8 编码的文本文件。"}, status=400)
-            return
-        if b"\x00" in raw:
-            self._send_json({"error": "看起来是二进制文件，这里只支持文本。"}, status=400)
-            return
+        # 图片按魔数认，不认扩展名：photo.png 里完全可以是任意二进制。
+        media_type = sniff_image_media_type(raw)
+        if media_type is None:
+            try:
+                raw.decode("utf-8")
+            except UnicodeDecodeError:
+                self._send_json(
+                    {"error": "只支持 UTF-8 编码的文本文件，或 PNG / JPEG / GIF / WebP 图片。"},
+                    status=400,
+                )
+                return
+            if b"\x00" in raw:
+                self._send_json(
+                    {"error": "看起来是二进制文件：这里只收文本或常见图片。"}, status=400
+                )
+                return
 
         root = code_root_for(
             settings.code_root, account.id if account is not None else None
@@ -563,13 +710,15 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"写入失败：{exc}"}, status=500)
             return
 
-        self._send_json(
-            {
-                "path": target.relative_to(root).as_posix(),
-                "bytes": len(raw),
-                "overwritten": overwritten,
-            }
-        )
+        response: dict[str, Any] = {
+            "path": target.relative_to(root).as_posix(),
+            "bytes": len(raw),
+            "overwritten": overwritten,
+            "kind": "image" if media_type else "text",
+        }
+        if media_type:
+            response["media_type"] = media_type
+        self._send_json(response)
 
     def _serve_metrics(self) -> None:
         """暴露 Prometheus 文本格式的指标。
@@ -1019,6 +1168,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         settings, guard_key = prepared
 
+        try:
+            image_attachments = collect_images(
+                settings,
+                payload.get("images"),
+                require_vision=str(getattr(self.server, "llm_mode", "mock")) != "mock",
+            )
+        except AgentCodeError as exc:
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
         run_id = uuid.uuid4().hex[:12]
         # 先落台账再干活：并发重发撞上同一个幂等键时，靠数据库的唯一索引分辨
         created = accounts.create_api_run(
@@ -1053,6 +1213,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "settings": settings,
             "guard_key": guard_key,
             "request_key": request_key,
+            "images": image_attachments,
         }
         if wants_stream:
             # 流式：响应本身就是事件流，不再走"后台线程 + 轮询"
@@ -1195,6 +1356,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         settings: Settings,
         guard_key: str,
         memory: ShortTermMemory | None = None,
+        images: Sequence[Mapping[str, Any]] | None = None,
     ):
         """跑一次 API 任务，逐条产出事件；结束时释放并发闸门。
 
@@ -1214,6 +1376,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 session_store=self.server.store_for(account.id),  # type: ignore[attr-defined]
                 session_id=session_id,
                 memory=memory,
+                images=images,
             ):
                 yield event
         except Exception as exc:  # noqa: BLE001 - 失败也要如实告诉调用方
@@ -1324,6 +1487,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         settings: Settings,
         guard_key: str,
         request_key: str = "",
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """真正跑一次任务：同步直接调用它，异步在后台线程里调用它。
 
@@ -1340,6 +1504,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 max_steps=max_steps,
                 settings=settings,
                 guard_key=guard_key,
+                images=images,
             )
         )
         return self._settle_api_run(
@@ -1367,6 +1532,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         settings: Settings,
         guard_key: str,
         request_key: str = "",
+        images: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         """POST /v1/run + ``stream: true``：用 SSE 把事件实时推给调用方。
 
@@ -1397,6 +1563,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 max_steps=max_steps,
                 settings=settings,
                 guard_key=guard_key,
+                images=images,
             ):
                 kind = event.get("type")
                 if kind == "answer":
@@ -1467,13 +1634,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         account, token = gate
         try:
-            task, memory = chat_messages_to_task(payload.get("messages"))
+            parsed = parse_chat_messages(payload.get("messages"))
         except AgentCodeError as exc:
             self._send_json(
                 {"error": {"message": str(exc), "type": "invalid_request_error"}},
                 status=400,
             )
             return
+        task, memory, images = parsed.task, parsed.memory, parsed.images
         agent_name = str(payload.get("agent") or "react").strip()
         if agent_name not in default_registry:
             self._send_json(
@@ -1509,6 +1677,18 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         settings, guard_key = prepared
 
+        if (
+            images
+            and str(getattr(self.server, "llm_mode", "mock")) != "mock"
+            and not (settings.vision_profile or settings.model_vision)
+        ):
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+            self._send_json(
+                {"error": {"message": VISION_REQUIRED, "type": "invalid_request_error"}},
+                status=400,
+            )
+            return
+
         run_id = uuid.uuid4().hex[:12]
         created = accounts.create_api_run(
             run_id,
@@ -1535,6 +1715,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "settings": settings,
             "guard_key": guard_key,
             "memory": memory,
+            "images": images,
         }
         if stream:
             self._serve_chat_stream(model=model, **job)
@@ -1551,6 +1732,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 settings=settings,
                 guard_key=guard_key,
                 memory=memory,
+                images=images,
             )
         )
         body = self._settle_api_run(
@@ -1578,7 +1760,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(self._chat_completion_body(body, model=model))
 
-    def _serve_chat_stream(self, *, account: Account, token: dict[str, Any], run_id: str, agent_name: str, task: str, session_id: str | None, max_steps: int | None, settings: Settings, guard_key: str, model: str, memory: ShortTermMemory | None = None) -> None:
+    def _serve_chat_stream(self, *, account: Account, token: dict[str, Any], run_id: str, agent_name: str, task: str, session_id: str | None, max_steps: int | None, settings: Settings, guard_key: str, model: str, memory: ShortTermMemory | None = None, images: Sequence[Mapping[str, Any]] | None = None) -> None:
         """``stream: true``：按 OpenAI 的 chunk 形状输出，最后以 ``[DONE]`` 结束。
 
         注意：我们流的是**步骤级进度**，最终答案是一次性给出的一段 content
@@ -1627,6 +1809,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             settings=settings,
             guard_key=guard_key,
             memory=memory,
+            images=images,
         ):
             if event.get("type") == "answer":
                 answer_event = event
@@ -1845,6 +2028,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any] | None:
         """读取并解析请求体，失败时直接返回 400。"""
+        limit = self._json_body_limit()
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -1853,9 +2037,11 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if length <= 0:
             self._send_json({"error": "请求体为空。"}, status=400)
             return None
-        if length > MAX_BODY_BYTES:
-            self._drain_body(MAX_BODY_BYTES * 16)  # 不然客户端会拿到"连接被中止"
-            self._send_json({"error": "请求体过大。"}, status=413)
+        if length > limit:
+            self._drain_body(limit)  # 不然客户端会拿到"连接被中止"
+            self._send_json(
+                {"error": f"请求体过大（上限 {limit // 1024} KB）。"}, status=413
+            )
             return None
         raw = self.rfile.read(length)
         try:
@@ -1867,6 +2053,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "请求体必须是 JSON 对象。"}, status=400)
             return None
         return payload
+
+    def _json_body_limit(self) -> int:
+        """按路径给 JSON 体积上限。
+
+        只有 OpenAI 兼容的 chat 接口需要收内联图片；其余接口维持 64 KB，
+        免得别处也被一个超大 body 拖住。
+        """
+        path = self.path.split("?", 1)[0]
+        if path == "/v1/chat/completions":
+            return MAX_CHAT_BODY_BYTES
+        return MAX_BODY_BYTES
 
     # ----------------------------------------------------------------- 路由
 
@@ -2269,6 +2466,17 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             }
         )
 
+        try:
+            image_attachments = collect_images(
+                settings,
+                payload.get("images"),
+                # 演示模式不接真实模型，不该被视觉配置挡住
+                require_vision=llm_mode != "mock",
+            )
+        except AgentCodeError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
         # 频率 + 并发闸门：一次任务会调用模型十几次，只在开头查每日额度挡不住并发
         guard_key = self._client_key()
         decision = self.server.guard.acquire(  # type: ignore[attr-defined]
@@ -2309,6 +2517,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 settings=settings,
                 session_store=session_store,
                 session_id=session_id,
+                images=image_attachments,
             ),
             agent=agent_name,
             task=task,

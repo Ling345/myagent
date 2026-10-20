@@ -273,6 +273,10 @@ class Settings:
     tool_calling: str = DEFAULT_TOOL_CALLING
     #: 多模型档位：{档位名: {model, base_url, api_key_env/api_keys_env, fallback, ...}}
     model_profiles: dict[str, Any] = field(default_factory=dict)
+    #: 带图片的请求走哪个档位（该档位必须是支持视觉的模型）
+    vision_profile: str = ""
+    #: 单模型本身就是视觉模型时置 true，允许直接带图
+    model_vision: bool = False
     #: 档位配置文件的路径（配了却读不到会在 validate 里报错）
     model_profiles_file: str = DEFAULT_MODEL_PROFILES_FILE
     #: 默认档位；留空时取名字排序后的第一个
@@ -427,6 +431,8 @@ class Settings:
                 pick("AGENT_TOOL_CALLING", DEFAULT_TOOL_CALLING) or DEFAULT_TOOL_CALLING
             ).strip().lower(),
             model_profiles=profiles_data,
+            vision_profile=str(pick("AGENT_VISION_PROFILE") or "").strip(),
+            model_vision=_to_bool(pick("AGENT_MODEL_VISION"), False),
             model_profiles_file=profiles_file,
             default_profile=default_profile,
             profile_by_agent=profile_by_agent,
@@ -561,6 +567,15 @@ class Settings:
             parse_profiles(self.model_profiles, env=self.profile_env())
         if self.profile_by_agent and not self.model_profiles:
             raise ConfigError("配了 profile_by_agent，却没有配置任何模型档位（model_profiles）。")
+        if self.vision_profile:
+            if not self.model_profiles:
+                raise ConfigError(
+                    "配了 AGENT_VISION_PROFILE，却没有配置任何模型档位（AGENT_MODEL_PROFILES）。"
+                )
+            if self.vision_profile not in self.model_profiles:
+                raise ConfigError(
+                    f"AGENT_VISION_PROFILE 指向的档位不存在：{self.vision_profile}。"
+                )
         if self.default_profile and self.model_profiles:
             if self.default_profile not in self.model_profiles:
                 raise ConfigError(f"default_profile 指定的档位不存在：{self.default_profile}。")
@@ -635,6 +650,8 @@ class Settings:
             }.get(self.tool_calling, self.tool_calling),
             "AGENT_MODEL_PROFILES": self._profiles_summary(),
             "AGENT_MODEL_PROFILES_FILE": self.model_profiles_file or "（未配置，单模型）",
+            "AGENT_VISION_PROFILE": self.vision_profile or "（未配置，带图请求会被拒绝）",
+            "AGENT_MODEL_VISION": "是" if self.model_vision else "否",
             "AGENT_API_RUNS_DAYS": str(self.api_runs_days)
             + ("（永久保留）" if self.api_runs_days <= 0 else ""),
             # 回调的签名密钥按密钥处理：它能让攻击者伪造回调

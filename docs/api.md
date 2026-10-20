@@ -46,6 +46,7 @@ Authorization: Bearer agk_xxxxxxxxxxxxxxxxxxxxxxxx
 | `max_steps` | 否 | 本轮最多跑几步；不填按服务端配置 |
 | `async` | 否 | `true` 时立刻返回 `202` + `run_id`，任务在后台跑（见第 4 节） |
 | `stream` | 否 | `true` 时响应变成 SSE 事件流，边跑边推（见第 5 节）；与 `async` 互斥 |
+| `images` | 否 | 工作目录里的图片路径数组，最多 4 张（如 `["shot.png"]`）；见下方说明 |
 
 请求头还可以带一个 **`Idempotency-Key`**（见第 7 节）：网络抖动重发时，
 同一个键只会跑一次、只扣一次费。
@@ -56,6 +57,12 @@ curl -sS -X POST "$AGENTCODE_URL/v1/run" \
   -H "Content-Type: application/json" \
   -d '{"agent": "coding", "task": "给 utils.py 补 pytest 测试", "session_id": "ci-42"}'
 ```
+
+**图片**：`"images": ["shot.png"]` 里的路径相对该账号的代码工作目录，不能用 `../` 越界。
+支持 PNG / JPEG / GIF / WebP，按文件头识别；单张 2 MB。服务端读成 base64 data URL，
+按 OpenAI 兼容的 `image_url` 内容块发给模型。真实模式要求配好视觉模型
+（`AGENT_VISION_PROFILE` 指向一个支持图片的档位，或 `AGENT_MODEL_VISION=true`），
+否则返回 `400` 并说明缺什么。
 
 返回（`200`）：
 
@@ -174,6 +181,9 @@ curl -sS -X POST "$AGENTCODE_URL/v1/chat/completions" \
 - `system` 消息被忽略：智能体的系统提示词（工具、纪律）由服务端决定，调用方不能覆盖；
 - `model` 只用于回显（服务端用自己配置的模型）；`temperature` 会透传给本次运行；
 - 可选扩展字段 `agent` 指定用哪个智能体（默认 `react`），例如 `"agent": "coding"`。
+- `content` 可以是字符串，也可以是 `text` / `image_url` 内容块数组。图片只收 **base64
+  data URL**（`data:image/png;base64,...`）；远程 `http(s)` 地址不代取，避免服务端
+  被当成内网探针。历史轮次里的图片只留 `[图片]` 占位，不会重复转发。
 
 另外 `GET /v1/models` 返回当前配置的模型（含多模型档位），很多客户端连上来会先探这个。
 

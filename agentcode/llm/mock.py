@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from agentcode.core.errors import LLMError
+from agentcode.llm.attachments import estimate_prompt_chars
 from agentcode.llm.base import BaseLLM, Message
 
 
 def _estimate_usage(messages: Sequence[Message], reply: str) -> dict[str, Any]:
     """按字符数粗略估算 token，仅用于展示。"""
-    prompt_chars = sum(len(str(item.get("content", ""))) for item in messages)
+    prompt_chars = sum(estimate_prompt_chars(item.get("content")) for item in messages)
     return {
         "prompt_tokens": max(1, prompt_chars // 2),
         "completion_tokens": max(1, len(reply) // 2),
@@ -122,3 +123,19 @@ def demo_responses_llm(agent: str = "react") -> ScriptedLLM:
         ],
     }
     return ScriptedLLM(scripts.get(agent, scripts["react"]))
+
+
+def demo_vision_llm(count: int, names: list[str], agent: str = "react") -> ScriptedLLM:
+    """演示模式下的"收到图片"回执。
+
+    离线脚本模型不会真的看图——这里只让上传、传输、消息拼装这条链路
+    能在没有视觉模型的情况下被完整看到。答案里把话说明白，免得被当成
+    真实识别结果。
+    """
+    listed = "、".join(str(name).replace("[", "（").replace("]", "）") for name in names[:4])
+    detail = f"：{listed}" if listed else ""
+    answer = (
+        f"（演示模式）收到 {count} 张图片{detail}。"
+        "演示模式不做真实识别；配置支持视觉的模型后才能描述图片内容。"
+    )
+    return ScriptedLLM([f"Thought: 已收到图片附件。\nAction: Finish[{answer}]"])

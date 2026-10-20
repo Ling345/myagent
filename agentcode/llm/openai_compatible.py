@@ -12,6 +12,7 @@ import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from agentcode.core.errors import ConfigError, LLMError
+from agentcode.llm.attachments import estimate_prompt_chars
 from agentcode.llm.base import BaseLLM, LLMReply, Message, ToolCallRequest
 from agentcode.llm.keypool import (
     DEFAULT_COOLDOWN_SECONDS,
@@ -298,7 +299,10 @@ class OpenAICompatibleLLM(BaseLLM):
                     chunks.append(content)
             text = "".join(chunks)
             self._last_usage = usage or {
-                "prompt_tokens": sum(len(str(m.get("content", ""))) for m in messages) // 2,
+                "prompt_tokens": sum(
+                    estimate_prompt_chars(m.get("content")) for m in messages
+                )
+                // 2,
                 "completion_tokens": len(text) // 2,
                 "estimated": True,
             }
