@@ -18,9 +18,9 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 本地路径 | `D:\agent\agentcode-homework1` |
 | Python | `D:\Anaconda\python.exe`（3.13）；CI 还跑 3.10 / Windows 3.13 |
 | 数据库 schema | **v8**（代码里的最新迁移；老库在下次打开时自动升上来。迁移只增不改、逐条事务、幂等，见 `agentcode/storage/migrations.py`） |
-| 代码量 | `agentcode/` 约 1.31 万行 Python；75 个测试文件 |
-| 测试 | **934 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
-| 提交 | 93 次；PR #1–#17、#18、#19 已合并（#2 是重复提交，已关闭未合并） |
+| 代码量 | `agentcode/` 约 1.32 万行 Python；76 个测试文件 |
+| 测试 | **942 项全部离线**（不打真实模型、不联网、不发行邮件；其中 1 项"POSIX 权限位"只在 Linux 上跑） |
+| 提交 | 94 次；PR #1–#17、#18、#19 已合并（#2 是重复提交，已关闭未合并） |
 | 远程状态 | 只保留 `main`；功能分支合并后即删 |
 
 ## 2. 模块地图（`agentcode/`）
@@ -70,6 +70,7 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | #17 | 任务完成回调：签名 + 失败重试 + 防 SSRF（迁移 v8，`docs/api.md` 第 5 节） |
 | #18 | 原生工具调用（JSON Schema + `tool_calls`）+ 结构化输出（`llm/structured.py`），带自动回退 |
 | #19 | 多模型档位与跨供应商降级（`llm/routing.py`、`configs/models.example.json`） |
+| #20 | 提示词前缀稳定（稳定 system 块 + 变化 user 块）+ 缓存命中 token 解析与指标 |
 
 更早的阶段（框架本体、网页、上下文记忆、会话管理、账号体系、容器化执行、限流与
 多 key 熔断、coding 智能体）在 PR #1 之前直接推到 main，没有单独 PR。
@@ -91,6 +92,13 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
   没配档位就完全走老路（单模型 + key 池）。指标：`agentcode_model_used_total{profile}`、
   `agentcode_model_fallback_total{from,to}`。
 - 指标：`agentcode_tool_calling_total{mode=native|text|fallback}`。
+- **提示词前缀稳定（prompt cache 的前提）**：模板拆成两块——`*_SYSTEM_PROMPT`（工具清单 +
+  格式 + 规则，**一次运行内不变**）放 `role="system"`，`*_TASK_TEMPLATE`（历史 / 已跑步骤 /
+  当前任务）放 `role="user"`。供应商侧只缓存"最长公共前缀"，所以**别往稳定块里塞任何
+  每次会变的东西**。真实模型实测：2 次调用、1849 prompt tokens 里有 768 命中缓存。
+  缓存 token 从 `prompt_cache_hit_tokens`（DeepSeek）或 `prompt_tokens_details.cached_tokens`
+  （OpenAI）解析，进 `usage.cache_hit_tokens` / `usage.cache_miss_tokens` 与指标
+  `agentcode_prompt_cache_tokens_total{result=hit|miss}`。
 
 ## 4. 对外 API 现状（`docs/api.md` 是用户文档）
 
@@ -115,7 +123,6 @@ AgentCode：一个可扩展的 Python 智能体框架（ReAct / Plan-and-Solve /
 | 真支付接入 | 订单现在是人工确认（`billing confirm`） | 与定价策略相关，用户之前说先放一放 |
 | 团队协作 | `team` 套餐目前只是额度更大，没有成员管理 | 卖团队客户时迟早要有 |
 | ICP 备案 / 数据出境评估 | 合规前置条件 | 非代码事项，见 `docs/data-and-privacy.md` |
-| prompt cache（让提示词前缀稳定） | 供应商侧的缓存要"前缀不变"才命中；现在提示词把变化的部分放在前面 | 只碰 `agents/prompts.py`，单独一个 PR 做 |
 | 对外流式（SSE / OpenAI 兼容） | 客户端与 IDE 接入的门槛项 | 网页有 SSE，`/v1/*` 没有 |
 | 多模态输入（图片/PDF） | 现在只收文本、单文件 2 MB | 有"看图"需求再做 |
 | 代码库语义检索（repo index） | Cursor/Devin 式"改一处知道影响哪几处"；对 coding / test_gen 直接提质 | 现在只有逐文件 list/read |
@@ -196,6 +203,10 @@ launch_chrome_cdp.ps1 + verify_*.mjs（真浏览器验证）
   `extra.model_profile`；单档时的额外开销只是一次函数调用。
 - **没配 `default` 时按配置文件里的书写顺序取第一个档位**，不是按名字排序
   ——否则 `strong`/`cheap` 这种命名会让"便宜的那个"意外变成默认。
+- **提示词模板拆成"稳定 system + 变化 user"**：改提示词时，工具清单/格式/纪律只能进
+  稳定块，历史/步骤/任务只能进 user 块——混了就等于把 prompt cache 关掉。
+- **缓存命中数不是每家都给**：DeepSeek 给 `prompt_cache_hit_tokens`，OpenAI 给
+  `prompt_tokens_details.cached_tokens`；都没有时 `usage` 里不会出现这两个键（别在界面里假定有）。
 
 ## 9. 这个项目的约定（别破坏）
 

@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
-from agentcode.agents.prompts import TEST_GEN_PROMPT_TEMPLATE
+from agentcode.agents.prompts import (
+    TEST_GEN_NATIVE_SYSTEM_PROMPT,
+    TEST_GEN_SYSTEM_PROMPT,
+)
 from agentcode.agents.react import ReActAgent
 from agentcode.core.context import RunContext
 from agentcode.core.registry import register_agent
@@ -23,15 +26,9 @@ class TestGenerationAgent(ReActAgent):
     name = "test_gen"
     description = "测试生成智能体：为指定源码生成 pytest 用例，并真的跑通。"
     default_max_steps = DEFAULT_TEST_GEN_STEPS
-
-    def _build_prompt(self, task: str, steps: list[str], history: str) -> str:
-        """渲染测试生成提示词。"""
-        return TEST_GEN_PROMPT_TEMPLATE.format(
-            tools=self.tools.describe(),
-            question=task,
-            history=history,
-            steps="\n".join(steps) if steps else "（暂无）",
-        )
+    #: 测试生成的纪律（只写测试、必须覆盖边界……）进稳定前缀
+    SYSTEM_PROMPT = TEST_GEN_SYSTEM_PROMPT
+    NATIVE_SYSTEM_PROMPT = TEST_GEN_NATIVE_SYSTEM_PROMPT
 
     def run(self, task: str, context: RunContext | None = None) -> AgentResult:
         """前置检查：没有代码工具就明确报错，而不是空转十几步。"""

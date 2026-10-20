@@ -257,3 +257,7 @@ MODEL_USED = METRICS.counter("agentcode_model_used_total", "每个模型档位�
 MODEL_FALLBACK = METRICS.counter(
     "agentcode_model_fallback_total", "模型档位降级次数，按 from/to"
 )
+PROMPT_CACHE = METRICS.counter(
+    "agentcode_prompt_cache_tokens_total",
+    "供应商侧提示词缓存的 token 数，按 result（hit/miss）",
+)

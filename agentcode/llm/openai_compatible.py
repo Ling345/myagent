@@ -19,7 +19,7 @@ from agentcode.llm.keypool import (
     KeyPool,
     parse_keys,
 )
-from agentcode.metrics import LLM_CALLS, LLM_SECONDS
+from agentcode.metrics import LLM_CALLS, LLM_SECONDS, PROMPT_CACHE
 
 #: 按 (base_url, api_key, timeout) 复用同一个 SDK 客户端，
 #: 避免每次请求都重新建连接池、重做 TLS 握手
@@ -61,17 +61,73 @@ def _shared_client(api_key: str, base_url: str, timeout: float) -> Any:
         return client
 
 
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cache_tokens(usage: Any) -> tuple[int | None, int | None]:
+    """挖出缓存命中/未命中的 token（各家的字段名不一样，都认）。
+
+    - DeepSeek 风格：``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``；
+    - OpenAI 风格：``prompt_tokens_details.cached_tokens``（只报命中）。
+    """
+    if usage is None:
+        return None, None
+    if isinstance(usage, Mapping):
+        hit = usage.get("prompt_cache_hit_tokens")
+        miss = usage.get("prompt_cache_miss_tokens")
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, Mapping) else None
+    else:
+        hit = getattr(usage, "prompt_cache_hit_tokens", None)
+        miss = getattr(usage, "prompt_cache_miss_tokens", None)
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
+    hit, miss, cached = _as_int(hit), _as_int(miss), _as_int(cached)
+    if hit is None and cached is not None:
+        hit = cached
+    return hit, miss
+
+
+def _record_cache_usage(usage: dict[str, Any] | None) -> None:
+    """把缓存命中情况记进指标（没有缓存信息的服务商就什么都不记）。"""
+    if not usage:
+        return
+    hit = int(usage.get("cache_hit_tokens") or 0)
+    miss = int(usage.get("cache_miss_tokens") or 0)
+    if hit:
+        PROMPT_CACHE.inc(hit, result="hit")
+    if miss:
+        PROMPT_CACHE.inc(miss, result="miss")
+
+
 def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
     """把 SDK 的 usage 对象转成字典。"""
     if usage is None:
         return None
     if isinstance(usage, Mapping):
-        return dict(usage)
+        data = dict(usage)
+        hit, miss = _cache_tokens(usage)
+        if hit is not None:
+            data["cache_hit_tokens"] = hit
+        if miss is not None:
+            data["cache_miss_tokens"] = miss
+        return data or None
     data: dict[str, Any] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         value = getattr(usage, key, None)
         if value is not None:
             data[key] = value
+    hit, miss = _cache_tokens(usage)
+    if hit is not None:
+        data["cache_hit_tokens"] = hit
+    if miss is not None:
+        data["cache_miss_tokens"] = miss
     return data or None
 
 
@@ -219,6 +275,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 content = getattr(message, "content", "") or ""
                 calls = _tool_calls_to_list(getattr(message, "tool_calls", None))
                 self._last_usage = _usage_to_dict(getattr(response, "usage", None))
+                _record_cache_usage(self._last_usage)
                 _record_llm_call(state.index, "ok", started)
                 return LLMReply(
                     text=content,
@@ -245,6 +302,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 "completion_tokens": len(text) // 2,
                 "estimated": True,
             }
+            _record_cache_usage(usage)
             _record_llm_call(state.index, "ok", started)
             return LLMReply(text=text)
         except LLMError:

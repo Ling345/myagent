@@ -13,7 +13,12 @@
 
 from __future__ import annotations
 
-from agentcode.agents.prompts import REACT_NATIVE_PROMPT_TEMPLATE, REACT_PROMPT_TEMPLATE
+from agentcode.agents.prompts import (
+    REACT_NATIVE_SYSTEM_PROMPT,
+    REACT_NATIVE_TASK_TEMPLATE,
+    REACT_SYSTEM_PROMPT,
+    REACT_TASK_TEMPLATE,
+)
 from agentcode.core.agent import BaseAgent
 from agentcode.core.context import RunContext
 from agentcode.core.errors import LLMError
@@ -31,15 +36,28 @@ class ReActAgent(BaseAgent):
 
     name = "react"
     description = "ReAct 范式：边推理边调用工具，适合需要实时信息的任务。"
+    #: 稳定前缀：工具清单 + 格式 + 规则；子类换成带自己纪律的版本
+    SYSTEM_PROMPT = REACT_SYSTEM_PROMPT
+    NATIVE_SYSTEM_PROMPT = REACT_NATIVE_SYSTEM_PROMPT
 
-    def _build_prompt(self, task: str, steps: list[str], history: str) -> str:
-        """渲染当轮提示词。"""
-        return REACT_PROMPT_TEMPLATE.format(
-            tools=self.tools.describe(),
-            question=task,
-            history=history,
-            steps="\n".join(steps) if steps else "（暂无）",
-        )
+    def _build_messages(
+        self, task: str, steps: list[str], history: str
+    ) -> list[Message]:
+        """两段式消息：稳定的 system + 变化的 user（prefix cache 才命中得了）。"""
+        return [
+            {
+                "role": "system",
+                "content": self.SYSTEM_PROMPT.format(tools=self.tools.describe()),
+            },
+            {
+                "role": "user",
+                "content": REACT_TASK_TEMPLATE.format(
+                    history=history,
+                    steps="\n".join(steps) if steps else "（暂无）",
+                    question=task,
+                ),
+            },
+        ]
 
     def run(self, task: str, context: RunContext | None = None) -> AgentResult:
         """执行 ReAct 循环直到给出最终答案或达到步数上限。"""
@@ -65,20 +83,25 @@ class ReActAgent(BaseAgent):
 
     # -------------------------------------------------------------- 原生工具调用
 
-    def _build_native_prompt(self, task: str, history: str) -> str:
-        """原生模式的提示词：工具由 schema 描述，这里只说清"要干什么"。"""
-        return REACT_NATIVE_PROMPT_TEMPLATE.format(
-            tools=self.tools.describe(),
-            question=task,
-            history=history,
-        )
+    def _build_native_messages(self, task: str, history: str) -> list[Message]:
+        """原生模式：同样"稳定 system + 变化 user"。"""
+        return [
+            {
+                "role": "system",
+                "content": self.NATIVE_SYSTEM_PROMPT.format(tools=self.tools.describe()),
+            },
+            {
+                "role": "user",
+                "content": REACT_NATIVE_TASK_TEMPLATE.format(
+                    history=history, question=task
+                ),
+            },
+        ]
 
     def _run_native(self, task: str, ctx: RunContext) -> AgentResult | None:
         """走原生工具调用；返回 ``None`` 表示"这家不支持，请回退"。"""
         history = self._history_text()
-        messages: list[Message] = [
-            {"role": "user", "content": self._build_native_prompt(task, history)}
-        ]
+        messages: list[Message] = self._build_native_messages(task, history)
         schemas = self.tools.json_schemas()
 
         for _ in range(self.max_steps):
@@ -175,9 +198,9 @@ class ReActAgent(BaseAgent):
         steps: list[str] = []
 
         for _ in range(self.max_steps):
-            prompt = self._build_prompt(task, steps, history)
+            messages = self._build_messages(task, steps, history)
             try:
-                raw = self._think([{"role": "user", "content": prompt}], ctx)
+                raw = self._think(messages, ctx)
             except LLMError as exc:
                 return self._build_result(task, "", ctx, success=False, error=f"调用模型失败：{exc}")
 

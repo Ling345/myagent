@@ -80,7 +80,8 @@ def test_coding_agent_prompt_mentions_test_discipline(tmp_path):
     agent = CodingAgent(llm=llm, tools=_code_tools(tmp_path))
     agent.run("随便写点东西")
 
-    prompt = llm.calls[0][-1]["content"]
+    # 纪律现在放在稳定的 system 前缀里（可变的历史/步骤/任务放 user）
+    prompt = llm.calls[0][0]["content"]
     assert "写测试文件" in prompt
     assert "run_python" in prompt
     assert "全绿" in prompt

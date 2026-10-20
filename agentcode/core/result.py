@@ -14,6 +14,9 @@ class TokenUsage:
     completion_tokens: int = 0
     calls: int = 0
     estimated: bool = False
+    #: 供应商侧提示词缓存的命中/未命中 token（没报就不显示）
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -29,16 +32,23 @@ class TokenUsage:
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         if usage.get("estimated"):
             self.estimated = True
+        self.cache_hit_tokens += int(usage.get("cache_hit_tokens") or 0)
+        self.cache_miss_tokens += int(usage.get("cache_miss_tokens") or 0)
 
     def to_dict(self) -> dict[str, Any]:
         """转为可序列化字典。"""
-        return {
+        data: dict[str, Any] = {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "calls": self.calls,
             "estimated": self.estimated,
         }
+        if self.cache_hit_tokens:
+            data["cache_hit_tokens"] = self.cache_hit_tokens
+        if self.cache_miss_tokens:
+            data["cache_miss_tokens"] = self.cache_miss_tokens
+        return data
 
 
 @dataclass

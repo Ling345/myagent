@@ -59,7 +59,8 @@ def test_test_gen_prompt_forbids_modifying_source(workspace):
     agent = TestGenerationAgent(llm=llm, tools=_tools(workspace))
     agent.run("为 calculator.py 生成测试")
 
-    prompt = llm.calls[0][-1]["content"]
+    # 纪律现在放在稳定的 system 前缀里（可变的历史/步骤/任务放 user）
+    prompt = llm.calls[0][0]["content"]
     assert "不要修改被测源文件" in prompt
     assert "边界" in prompt
 
