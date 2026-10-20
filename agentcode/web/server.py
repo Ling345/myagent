@@ -17,7 +17,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, quote, urlsplit
 
 from agentcode import agents  # noqa: F401  导入即注册内置智能体
@@ -31,6 +31,7 @@ from agentcode.config import (
 from agentcode.core.registry import default_registry
 from agentcode.core.errors import AgentCodeError
 from agentcode.lifecycle import code_root_for
+from agentcode.memory.short_term import ShortTermMemory
 from agentcode.metrics import HTTP_REQUESTS, HTTP_SECONDS, METRICS, REJECTIONS
 from agentcode.plans import get_plan
 from agentcode.web.auth import build_cookie, clear_cookie, create_token, read_cookie, read_token
@@ -136,6 +137,52 @@ def callback_summary(record: dict[str, Any]) -> dict[str, Any]:
         "delivered_at": str(record.get("callback_delivered_at") or ""),
         "next_attempt_at": str(record.get("callback_next_at") or ""),
     }
+
+
+def chat_messages_to_task(messages: Any) -> tuple[str, ShortTermMemory]:
+    """把 OpenAI 客户端的全量对话映射成（本次任务, 之前的对话记忆）。
+
+    OpenAI 的 chat 接口是**无状态**的：客户端每次都把完整对话发过来。所以：
+
+    - 最后一条 ``user`` 消息就是本次任务；
+    - 它之前的 ``user`` / ``assistant`` 配对还原成短期记忆，多轮对话才接得上；
+    - ``system`` 消息暂时忽略（各智能体的系统提示词由服务端决定，
+      不允许调用方覆盖——否则等于把纪律关掉）。
+    """
+    if not isinstance(messages, list) or not messages:
+        raise AgentCodeError("messages 不能为空。")
+    cleaned: list[dict[str, str]] = []
+    for item in messages:
+        if not isinstance(item, Mapping):
+            raise AgentCodeError("messages 里每一条都必须是对象。")
+        role = str(item.get("role") or "").strip().lower()
+        content = item.get("content")
+        if role not in {"system", "user", "assistant"}:
+            raise AgentCodeError(f"不支持的消息角色：{role or '（空）'}。")
+        if not isinstance(content, str):
+            raise AgentCodeError("content 必须是字符串（本接口暂不支持多段内容）。")
+        cleaned.append({"role": role, "content": content})
+    if cleaned[-1]["role"] != "user":
+        raise AgentCodeError("最后一条消息必须是 role=user。")
+    task = cleaned[-1]["content"].strip()
+    if not task:
+        raise AgentCodeError("最后一条 user 消息不能为空。")
+    memory = ShortTermMemory(max_turns=max(1, len(cleaned)))
+    pending_user = ""
+    for item in cleaned[:-1]:
+        if item["role"] == "system":
+            continue
+        if item["role"] == "user":
+            pending_user = item["content"]
+        elif pending_user:
+            memory.add_turn(
+                [
+                    {"role": "user", "content": pending_user},
+                    {"role": "assistant", "content": item["content"]},
+                ]
+            )
+            pending_user = ""
+    return task, memory
 
 
 def safe_upload_name(raw: str) -> str | None:
@@ -934,8 +981,15 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         max_steps = int(raw_steps) if isinstance(raw_steps, int) and raw_steps > 0 else None
         session_id = str(payload.get("session_id") or "").strip() or None
         wants_async = bool(payload.get("async"))
+        wants_stream = bool(payload.get("stream"))
         request_key = str(self.headers.get("Idempotency-Key") or "").strip()
         settings = self._settings()
+        if wants_async and wants_stream:
+            self._send_json(
+                {"error": "stream 与 async 只能选一个：流式响应本身就是实时的。"},
+                status=400,
+            )
+            return
 
         accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
         allowed, reason = accounts.check_quota(account)
@@ -960,22 +1014,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if callback_url is None:
             return  # 已经回过 400 了
 
-        plan = accounts.effective_plan(account)
-        settings = scope_settings_for_plan(settings, account.plan)
-        settings = settings.apply_overrides(
-            {"code_root": str(code_root_for(settings.code_root, account.id))}
-        )
-
-        # 限流按**账号**算（不是按 IP）：一把令牌被拿去刷，只影响它自己的额度
-        guard_key = f"api:{account.id}"
-        decision = self.server.guard.acquire(  # type: ignore[attr-defined]
-            guard_key,
-            per_minute=plan.per_minute,
-            max_concurrent=plan.max_concurrent,
-        )
-        if not decision.allowed:
-            self._reject_by_limit(decision)
+        prepared = self._api_settings_and_guard(account)
+        if prepared is None:
             return
+        settings, guard_key = prepared
 
         run_id = uuid.uuid4().hex[:12]
         # 先落台账再干活：并发重发撞上同一个幂等键时，靠数据库的唯一索引分辨
@@ -1012,6 +1054,10 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "guard_key": guard_key,
             "request_key": request_key,
         }
+        if wants_stream:
+            # 流式：响应本身就是事件流，不再走"后台线程 + 轮询"
+            self._serve_api_run_stream(**job)
+            return
         if wants_async:
             # 丢后台线程，立刻把 run_id 交出去——长任务不该让客户端干等
             threading.Thread(
@@ -1116,34 +1162,48 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         body.setdefault("error", record.get("error") or "任务没能完成。")
         self._send_json(body, status=502)
 
-    def _execute_api_job(
+    def _api_settings_and_guard(
+        self, account: Account, *, settings: Settings | None = None
+    ) -> tuple[Settings, str] | None:
+        """按套餐收口配置并占用并发闸门；被拒时已经回过响应，返回 None。"""
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        settings = settings or self._settings()
+        plan = accounts.effective_plan(account)
+        settings = scope_settings_for_plan(settings, account.plan)
+        settings = settings.apply_overrides(
+            {"code_root": str(code_root_for(settings.code_root, account.id))}
+        )
+        guard_key = f"api:{account.id}"
+        decision = self.server.guard.acquire(  # type: ignore[attr-defined]
+            guard_key,
+            per_minute=plan.per_minute,
+            max_concurrent=plan.max_concurrent,
+        )
+        if not decision.allowed:
+            self._reject_by_limit(decision)
+            return None
+        return settings, guard_key
+
+    def _iter_api_job(
         self,
         *,
         account: Account,
-        token: dict[str, Any],
-        run_id: str,
         agent_name: str,
         task: str,
         session_id: str | None,
         max_steps: int | None,
         settings: Settings,
         guard_key: str,
-        request_key: str = "",
-    ) -> dict[str, Any]:
-        """真正跑一次任务：同步直接调用它，异步在后台线程里调用它。
+        memory: ShortTermMemory | None = None,
+    ):
+        """跑一次 API 任务，逐条产出事件；结束时释放并发闸门。
 
-        两条路**同一段代码**——否则迟早出现"同步和异步行为不一样"。
-        无论成功失败，结果都写回台账（``api_runs``），进程重启后还取得到。
+        同步、异步、流式三条路共用它——区别只在调用方怎么处理事件
+        （攒到最后一次性返回 / 落库 / 直接写给连接）。
         """
-        from agentcode import audit as AUDIT
         from agentcode.web.runner import run_stream
 
-        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
-        # 后端由服务端决定：调用方不能在请求里挑 mock 去拿假答案
         llm_mode = str(getattr(self.server, "llm_mode", "mock"))
-        started = time.perf_counter()
-        answer_event: dict[str, Any] | None = None
-        error_message = ""
         try:
             for event in run_stream(
                 agent_name,
@@ -1153,17 +1213,47 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
                 settings=settings,
                 session_store=self.server.store_for(account.id),  # type: ignore[attr-defined]
                 session_id=session_id,
+                memory=memory,
             ):
-                if event.get("type") == "answer":
-                    answer_event = event
-                elif event.get("type") == "error":
-                    error_message = str((event.get("data") or {}).get("message") or "任务没能完成。")
+                yield event
         except Exception as exc:  # noqa: BLE001 - 失败也要如实告诉调用方
-            error_message = f"运行失败：{exc}"
+            yield {"type": "error", "data": {"message": f"运行失败：{exc}"}}
         finally:
             # 闸门在这里放：异步任务的并发名额要占到跑完，否则并发限制成了摆设
             self.server.guard.release(guard_key)  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _collect_api_events(events) -> tuple[dict[str, Any] | None, str]:
+        """把事件流收敛成（答案事件, 错误信息）。"""
+        answer_event: dict[str, Any] | None = None
+        error_message = ""
+        for event in events:
+            if event.get("type") == "answer":
+                answer_event = event
+            elif event.get("type") == "error":
+                error_message = str(
+                    (event.get("data") or {}).get("message") or "任务没能完成。"
+                )
+        return answer_event, error_message
+
+    def _settle_api_run(
+        self,
+        *,
+        account: Account,
+        token: dict[str, Any],
+        run_id: str,
+        agent_name: str,
+        session_id: str | None,
+        request_key: str,
+        answer_event: dict[str, Any] | None,
+        error_message: str,
+        started: float,
+    ) -> dict[str, Any]:
+        """收尾：记账、审计、写回台账、拼出对外结果（同步/异步/流式共用）。"""
+        from agentcode import audit as AUDIT
+
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        llm_mode = str(getattr(self.server, "llm_mode", "mock"))
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         data = dict((answer_event or {}).get("data") or {})
         usage = dict(data.get("usage") or {})
@@ -1194,25 +1284,420 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-        body = {
+        usage_out: dict[str, Any] = {
+            "total_tokens": total_tokens,
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+        }
+        # 供应商报了缓存命中就带上（没报就不出现，保持老输出的形状）
+        for key in ("cache_hit_tokens", "cache_miss_tokens"):
+            if usage.get(key):
+                usage_out[key] = int(usage[key])
+
+        body: dict[str, Any] = {
             "run_id": run_id,
             "agent": agent_name,
             "llm_mode": llm_mode,
             "session_id": session_id or "",
+            "status": "failed" if error_message else "succeeded",
             "success": not error_message,
             "answer": str(data.get("answer") or ""),
             "artifacts": data.get("artifacts") or [],
-            "usage": {
-                "total_tokens": total_tokens,
-                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                "completion_tokens": int(usage.get("completion_tokens") or 0),
-            },
+            "usage": usage_out,
             "elapsed_ms": elapsed_ms,
         }
         if error_message:
             body["error"] = error_message
         accounts.finish_api_run(run_id, result=body, error=error_message)
         return body
+
+    def _execute_api_job(
+        self,
+        *,
+        account: Account,
+        token: dict[str, Any],
+        run_id: str,
+        agent_name: str,
+        task: str,
+        session_id: str | None,
+        max_steps: int | None,
+        settings: Settings,
+        guard_key: str,
+        request_key: str = "",
+    ) -> dict[str, Any]:
+        """真正跑一次任务：同步直接调用它，异步在后台线程里调用它。
+
+        两条路**同一段代码**——否则迟早出现"同步和异步行为不一样"。
+        无论成功失败，结果都写回台账（``api_runs``），进程重启后还取得到。
+        """
+        started = time.perf_counter()
+        answer_event, error_message = self._collect_api_events(
+            self._iter_api_job(
+                account=account,
+                agent_name=agent_name,
+                task=task,
+                session_id=session_id,
+                max_steps=max_steps,
+                settings=settings,
+                guard_key=guard_key,
+            )
+        )
+        return self._settle_api_run(
+            account=account,
+            token=token,
+            run_id=run_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            request_key=request_key,
+            answer_event=answer_event,
+            error_message=error_message,
+            started=started,
+        )
+
+    def _serve_api_run_stream(
+        self,
+        *,
+        account: Account,
+        token: dict[str, Any],
+        run_id: str,
+        agent_name: str,
+        task: str,
+        session_id: str | None,
+        max_steps: int | None,
+        settings: Settings,
+        guard_key: str,
+        request_key: str = "",
+    ) -> None:
+        """POST /v1/run + ``stream: true``：用 SSE 把事件实时推给调用方。
+
+        事件顺序：``start`` → ``status`` / ``step`` 若干 → ``answer`` → ``done``。
+        客户端中途断开**不会**终止任务：剩下的单照跑、账照记，和异步一致。
+        """
+        started = time.perf_counter()
+        self._begin_sse()
+        client_gone = False
+        answer_event: dict[str, Any] | None = None
+        error_message = ""
+        try:
+            self._write_event(
+                {
+                    "type": "start",
+                    "data": {
+                        "run_id": run_id,
+                        "agent": agent_name,
+                        "session_id": session_id or "",
+                    },
+                }
+            )
+            for event in self._iter_api_job(
+                account=account,
+                agent_name=agent_name,
+                task=task,
+                session_id=session_id,
+                max_steps=max_steps,
+                settings=settings,
+                guard_key=guard_key,
+            ):
+                kind = event.get("type")
+                if kind == "answer":
+                    answer_event = event
+                elif kind == "error":
+                    error_message = str(
+                        (event.get("data") or {}).get("message") or "任务没能完成。"
+                    )
+                if not client_gone:
+                    try:
+                        self._write_event(event)
+                    except (BrokenPipeError, ConnectionResetError):
+                        client_gone = True
+            body = self._settle_api_run(
+                account=account,
+                token=token,
+                run_id=run_id,
+                agent_name=agent_name,
+                session_id=session_id,
+                request_key=request_key,
+                answer_event=answer_event,
+                error_message=error_message,
+                started=started,
+            )
+            if not client_gone:
+                try:
+                    self._write_event({"type": "done", "data": body})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        finally:
+            self._log_access(200)
+
+    # -------------------------------------------------- OpenAI 兼容的 chat 门面
+
+    @staticmethod
+    def _chat_completion_body(body: dict[str, Any], *, model: str) -> dict[str, Any]:
+        """把一次运行的结果包成 OpenAI 的 ``chat.completion`` 形状。"""
+        usage = body.get("usage") or {}
+        return {
+            "id": f"chatcmpl-{body['run_id']}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": body.get("answer", "")},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            },
+        }
+
+    def _serve_chat_completions(self, payload: dict[str, Any]) -> None:
+        """POST /v1/chat/completions：OpenAI 兼容门面（给 Cursor / IDE 这类客户端）。
+
+        只有"最后一条 user 消息 → 任务、之前的轮次 → 记忆"这一层映射；
+        工具、纪律、预算、限流、记账都走和 /v1/run 相同的那条链路。
+        """
+        from agentcode.core.registry import default_registry
+
+        gate = self._api_gate()
+        if gate is None:
+            return
+        account, token = gate
+        try:
+            task, memory = chat_messages_to_task(payload.get("messages"))
+        except AgentCodeError as exc:
+            self._send_json(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status=400,
+            )
+            return
+        agent_name = str(payload.get("agent") or "react").strip()
+        if agent_name not in default_registry:
+            self._send_json(
+                {
+                    "error": {
+                        "message": f"没有这个智能体：{agent_name}。",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=400,
+            )
+            return
+
+        settings = self._settings()
+        model = str(payload.get("model") or "").strip() or str(settings.model or "agentcode")
+        raw_temperature = payload.get("temperature")
+        if isinstance(raw_temperature, (int, float)) and not isinstance(raw_temperature, bool):
+            settings = settings.apply_overrides({"temperature": float(raw_temperature)})
+        stream = bool(payload.get("stream"))
+
+        accounts: AccountStore = self.server.accounts  # type: ignore[attr-defined]
+        allowed, reason = accounts.check_quota(account)
+        if not allowed:
+            REJECTIONS.inc(reason="quota")
+            self._notify_quota(account)
+            self._send_json(
+                {"error": {"message": reason, "type": "insufficient_quota"}},
+                status=402,
+            )
+            return
+        prepared = self._api_settings_and_guard(account, settings=settings)
+        if prepared is None:
+            return
+        settings, guard_key = prepared
+
+        run_id = uuid.uuid4().hex[:12]
+        created = accounts.create_api_run(
+            run_id,
+            account_id=account.id,
+            agent=agent_name,
+            task=task,
+            token_id=str(token["id"]),
+        )
+        if not created:
+            self.server.guard.release(guard_key)  # type: ignore[attr-defined]
+            self._send_json(
+                {"error": {"message": "任务提交冲突，请稍后重试。", "type": "server_error"}},
+                status=409,
+            )
+            return
+        job = {
+            "account": account,
+            "token": token,
+            "run_id": run_id,
+            "agent_name": agent_name,
+            "task": task,
+            "session_id": None,
+            "max_steps": None,
+            "settings": settings,
+            "guard_key": guard_key,
+            "memory": memory,
+        }
+        if stream:
+            self._serve_chat_stream(model=model, **job)
+            return
+
+        started = time.perf_counter()
+        answer_event, error_message = self._collect_api_events(
+            self._iter_api_job(
+                account=account,
+                agent_name=agent_name,
+                task=task,
+                session_id=None,
+                max_steps=None,
+                settings=settings,
+                guard_key=guard_key,
+                memory=memory,
+            )
+        )
+        body = self._settle_api_run(
+            account=account,
+            token=token,
+            run_id=run_id,
+            agent_name=agent_name,
+            session_id=None,
+            request_key="",
+            answer_event=answer_event,
+            error_message=error_message,
+            started=started,
+        )
+        if not body["success"]:
+            self._send_json(
+                {
+                    "error": {
+                        "message": body.get("error") or "任务没能完成。",
+                        "type": "agent_error",
+                        "code": "run_failed",
+                    }
+                },
+                status=502,
+            )
+            return
+        self._send_json(self._chat_completion_body(body, model=model))
+
+    def _serve_chat_stream(self, *, account: Account, token: dict[str, Any], run_id: str, agent_name: str, task: str, session_id: str | None, max_steps: int | None, settings: Settings, guard_key: str, model: str, memory: ShortTermMemory | None = None) -> None:
+        """``stream: true``：按 OpenAI 的 chunk 形状输出，最后以 ``[DONE]`` 结束。
+
+        注意：我们流的是**步骤级进度**，最终答案是一次性给出的一段 content
+        （token 级流式取决于模型后端，当前不做）。
+        """
+        started = time.perf_counter()
+        completion_id = f"chatcmpl-{run_id}"
+        created = int(time.time())
+        self._begin_sse()
+        client_gone = False
+
+        def send(payload: dict[str, Any]) -> None:
+            nonlocal client_gone
+            if client_gone:
+                return
+            try:
+                self.wfile.write(
+                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+                )
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                client_gone = True
+
+        def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> None:
+            send(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": delta, "finish_reason": finish_reason}
+                    ],
+                }
+            )
+
+        chunk({"role": "assistant"})
+        answer_event: dict[str, Any] | None = None
+        error_message = ""
+        for event in self._iter_api_job(
+            account=account,
+            agent_name=agent_name,
+            task=task,
+            session_id=session_id,
+            max_steps=max_steps,
+            settings=settings,
+            guard_key=guard_key,
+            memory=memory,
+        ):
+            if event.get("type") == "answer":
+                answer_event = event
+            elif event.get("type") == "error":
+                error_message = str(
+                    (event.get("data") or {}).get("message") or "任务没能完成。"
+                )
+        body = self._settle_api_run(
+            account=account,
+            token=token,
+            run_id=run_id,
+            agent_name=agent_name,
+            session_id=session_id,
+            request_key="",
+            answer_event=answer_event,
+            error_message=error_message,
+            started=started,
+        )
+        if body["success"]:
+            chunk({"content": body.get("answer", "")})
+            chunk({}, "stop")
+        else:
+            chunk({}, "stop")
+            send(
+                {
+                    "error": {
+                        "message": body.get("error") or "任务没能完成。",
+                        "type": "agent_error",
+                        "code": "run_failed",
+                    }
+                }
+            )
+        if not client_gone:
+            try:
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        self._log_access(200)
+
+    def _serve_api_models(self) -> None:
+        """GET /v1/models：客户端连上来先探这个，返回当前配置的模型（含档位）。"""
+        gate = self._api_gate()
+        if gate is None:
+            return
+        settings = self._settings()
+        ids: list[str] = []
+        if settings.model:
+            ids.append(str(settings.model))
+        for raw in (settings.model_profiles or {}).values():
+            item = raw if isinstance(raw, Mapping) else {}
+            model_id = str(item.get("model") or "")
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        if not ids:
+            ids = ["agentcode"]
+        created = int(time.time())
+        self._send_json(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_id,
+                        "object": "model",
+                        "created": created,
+                        "owned_by": "agentcode",
+                    }
+                    for model_id in ids
+                ],
+            }
+        )
 
     def _serve_api_run_status(self, run_id: str) -> None:
         """GET /v1/runs/<run_id>：这一单跑到哪了、结果是什么。"""
@@ -1485,6 +1970,9 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/me":
             self._serve_api_me()
             return
+        if path == "/v1/models":
+            self._serve_api_models()
+            return
         if path == "/v1/runs":
             self._serve_api_runs()
             return
@@ -1573,6 +2061,7 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             "/api/trash/empty",
             "/api/account/email",
             "/v1/run",
+            "/v1/chat/completions",
             "/api/tokens/create",
             "/api/tokens/revoke",
         ):
@@ -1600,6 +2089,14 @@ class AgentCodeRequestHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             self._serve_api_run(payload)
+            return
+
+        if path == "/v1/chat/completions":
+            # OpenAI 兼容门面：同样认令牌、不认 cookie
+            payload = self._read_json()
+            if payload is None:
+                return
+            self._serve_chat_completions(payload)
             return
 
         if path == "/api/logout":
